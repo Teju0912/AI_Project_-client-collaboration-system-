@@ -1,0 +1,61 @@
+PROJECT REQUIREMENT DOCUMENT
+Client: Nova Logistics Pvt. Ltd.
+Project: Warehouse Inventory Management System
+
+1. OVERVIEW
+Nova Logistics wants a web-based inventory management system to replace
+their current Excel-based tracking. The system should help warehouse staff
+track stock levels, manage suppliers, and alert managers when items run
+low.
+
+2. USER MANAGEMENT
+The system should support three types of users: Warehouse Staff, Managers,
+and Admins. Admins can create and remove user accounts. Managers can view
+reports and approve purchase orders. Warehouse staff can only update stock
+counts and mark items as received or shipped.
+
+3. INVENTORY TRACKING
+Every item in the warehouse needs a unique SKU code, a name, category,
+current quantity, minimum threshold, and unit price. Staff should be able
+to search for items by name or SKU. When an item is received or shipped,
+the quantity should update in real time.
+
+4. LOW STOCK ALERTS
+When an item's quantity falls below its minimum threshold, the system
+should automatically notify the assigned manager by email. The dashboard
+should also show a list of all low-stock items so managers can see them
+at a glance without waiting for an email.
+
+5. SUPPLIER MANAGEMENT
+Admins need to maintain a list of suppliers with contact details, the
+items each supplier provides, and average delivery time. When creating a
+purchase order, the system should suggest the best supplier based on past
+delivery performance.
+
+6. PURCHASE ORDERS
+Managers should be able to create a purchase order for one or more items,
+send it to the selected supplier, and track its status (pending, shipped,
+received). Once a purchase order is marked received, the corresponding
+inventory quantities should update automatically.
+
+7. REPORTING
+The system should generate a weekly report showing: total stock value,
+items sold or shipped that week, items received that week, and a list of
+items currently below their minimum threshold. Reports should be
+downloadable as PDF or Excel.
+
+8. NOTIFICATIONS
+Beyond low-stock alerts, the system should notify managers when a
+purchase order is overdue (past its expected delivery date) and when a
+new user account is created, for approval.
+
+9. NON-FUNCTIONAL REQUIREMENTS
+The system should be accessible on both desktop and tablet, since
+warehouse staff often use tablets on the floor. Data should be backed up
+daily. The system should support at least 20 concurrent users without
+noticeable slowdown.
+
+10. TIMELINE
+Nova Logistics would like a working version covering inventory tracking
+and low-stock alerts within 6 weeks, with supplier management and
+purchase orders following in a second phase.

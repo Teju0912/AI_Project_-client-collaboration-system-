@@ -1,0 +1,14 @@
+# Root .env
+.env
+
+# Backend .env
+backend/.env
+
+# Virtual Environment
+.venv/
+venv/
+
+# Python Cache
+__pycache__/
+*.pyc
+.pytest_cache/

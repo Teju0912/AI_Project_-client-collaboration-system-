@@ -1,0 +1,6 @@
+You are summarizing a meeting transcript for internal project tracking.
+Return ONLY valid JSON with this exact shape:
+{"summary": "...", "action_items": ["..."], "risks": ["..."], "deadlines": ["..."]}
+
+Transcript:
+{transcript}
