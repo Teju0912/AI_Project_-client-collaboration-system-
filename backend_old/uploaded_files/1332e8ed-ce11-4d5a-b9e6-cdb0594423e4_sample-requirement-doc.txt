@@ -1,0 +1,45 @@
+Project: Online Grocery Delivery App - Requirement Document
+
+Client: FreshCart Pvt Ltd
+Prepared for: Development Team
+
+1. Overview
+FreshCart wants a mobile-first web application where customers can browse groceries,
+add items to cart, and get same-day delivery. Admin should be able to manage inventory
+and delivery partners should have a separate app to track and update delivery status.
+
+2. Customer-Facing Features
+- Customers should be able to register/login using phone number and OTP.
+- Customers should be able to browse products by category (Fruits, Vegetables, Dairy, Snacks).
+- Customers should be able to search products by name.
+- Customers should be able to add products to cart and modify quantity.
+- Customers should be able to apply discount coupons at checkout.
+- Customers should be able to pay via UPI, Credit/Debit Card, or Cash on Delivery.
+- Customers should be able to track their order status in real time (Placed, Packed,
+  Out for Delivery, Delivered).
+- Customers should be able to rate and review products after delivery.
+- Customers should receive SMS/push notification when order status changes.
+
+3. Admin Panel Features
+- Admin should be able to add/edit/delete products with images, price, and stock count.
+- Admin should be able to view all orders and filter by status.
+- Admin should be able to assign an order to a specific delivery partner.
+- Admin should be able to view daily sales reports.
+- Admin should be able to manage discount coupons (create, activate, deactivate).
+
+4. Delivery Partner App Features
+- Delivery partner should be able to see assigned orders for the day.
+- Delivery partner should be able to update order status (Picked up, Out for delivery, Delivered).
+- Delivery partner should be able to see customer address on a map.
+- Delivery partner should be able to mark an order as "Failed Delivery" with a reason.
+
+5. Non-Functional Requirements
+- The app should support at least 5000 concurrent users during peak hours.
+- Payment data must be PCI-DSS compliant; no raw card details stored on our servers.
+- Average page load time should be under 2 seconds on 4G connection.
+- The system should send order confirmation within 5 seconds of successful payment.
+
+6. Out of Scope (Phase 1)
+- International delivery
+- Loyalty/rewards points program
+- Multi-language support (English only for now)

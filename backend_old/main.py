@@ -16,22 +16,20 @@ _ROOT_DIR = _BACKEND_DIR.parent
 load_dotenv(dotenv_path=_BACKEND_DIR / ".env")
 load_dotenv(dotenv_path=_ROOT_DIR / ".env", override=False)
 
-from routers.auth import router as auth_router
-from routers.clients import router as clients_router
-from routers.tasks import router as tasks_router
-from routers.documents import router as documents_router
-from routers.users import router as users_router
-from routers.projects import router as projects_router
-from routers.client_dashboard import router as client_dashboard_router
-from routers.ai import router as ai_router
-from routers.weekly_reports import router as weekly_reports_router
-from routers.meetings import router as meetings_router
-from routers import chat_assistant
-from routers.requirement_analyzer import router as requirement_analyzer_router
+from backend.routers.auth import router as auth_router
+from backend.routers.clients import router as clients_router
+from backend.routers.tasks import router as tasks_router
+from backend.routers.documents import router as documents_router
+from backend.routers.users import router as users_router
+from backend.routers.projects import router as projects_router
+from backend.routers.client_dashboard import router as client_dashboard_router
+from backend.routers.ai import router as ai_router
+from backend.routers.weekly_reports import router as weekly_reports_router
+from backend.routers.meetings import router as meetings_router
+from backend.routers import chat_assistant
+from backend.routers.requirement_analyzer import router as requirement_analyzer_router
 
-from database import initialize_database
-
-
+from backend.database import initialize_database
 initialize_database()
 
 app = FastAPI(
