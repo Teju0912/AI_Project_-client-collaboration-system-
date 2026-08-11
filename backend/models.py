@@ -32,7 +32,7 @@ def _embedding_column():
     try:
         from pgvector.sqlalchemy import Vector as _PgVector
 
-        return Column(_PgVector(384))
+        return Column(_PgVector(768))
     except ImportError:  # pragma: no cover
         return Column(JSON)
 

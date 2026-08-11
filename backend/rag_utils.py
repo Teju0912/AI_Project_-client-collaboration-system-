@@ -15,21 +15,24 @@ from sqlalchemy.orm import Session
 
 import models
 
-# Lazy-loaded so importing routers does not block on model download / Groq init.
-_embedding_model = None
+# Lazy-loaded so importing routers does not block on API client init.
+_gemini_client = None
 _groq_client = None
+
+# Keep this in sync with the `embedding` column's Vector(...) dimension in models.py.
+EMBED_DIM = 768
 
 
 def check_rag_dependencies() -> tuple[bool, str]:
     """
     Verify packages needed to index documents and answer from them.
-    Uses find_spec so startup does not load heavy ML libraries.
+    Uses find_spec so startup does not load heavy libraries.
     """
     import importlib.util
 
     missing = []
     for mod_name, pip_name in (
-        ("sentence_transformers", "sentence-transformers"),
+        ("google.genai", "google-genai"),
         ("pypdf", "pypdf"),
         ("docx", "python-docx"),
         ("pptx", "python-pptx"),
@@ -43,6 +46,11 @@ def check_rag_dependencies() -> tuple[bool, str]:
             + ", ".join(missing)
             + ". Install with: pip install -r requirements-rag.txt"
         )
+    if not os.getenv("GEMINI_API_KEY"):
+        return False, (
+            "GEMINI_API_KEY is not set — document indexing will fail "
+            "(embeddings use the Gemini API)."
+        )
     if not os.getenv("GROQ_API_KEY"):
         return False, (
             "GROQ_API_KEY is not set — document indexing works, "
@@ -51,19 +59,19 @@ def check_rag_dependencies() -> tuple[bool, str]:
     return True, "RAG ready"
 
 
-def _get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
         try:
-            from sentence_transformers import SentenceTransformer
+            from google import genai
         except ImportError as exc:
             raise RuntimeError(
-                "sentence-transformers is not installed. "
+                "google-genai is not installed. "
                 "Run: pip install -r requirements-rag.txt"
             ) from exc
 
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embedding_model
+        _gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _gemini_client
 
 
 def _get_groq_client():
@@ -209,11 +217,26 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str
 
 
 # ---------------------------------------------------------------------------
-# Embeddings
+# Embeddings (Gemini API — no local model download)
 # ---------------------------------------------------------------------------
 
-def get_embedding(text: str) -> list[float]:
-    return _get_embedding_model().encode(text, normalize_embeddings=True).tolist()
+def get_embedding(text: str, *, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]:
+    """
+    task_type should be "RETRIEVAL_DOCUMENT" when indexing chunks and
+    "RETRIEVAL_QUERY" when embedding a user's question — Gemini tunes the
+    embedding differently for each, which improves retrieval quality.
+    """
+    from google.genai.types import EmbedContentConfig
+
+    response = _get_gemini_client().models.embed_content(
+        model="gemini-embedding-001",
+        contents=text,
+        config=EmbedContentConfig(
+            task_type=task_type,
+            output_dimensionality=EMBED_DIM,
+        ),
+    )
+    return response.embeddings[0].values
 
 
 def chunk_count_for_document(db: Session, document_id) -> int:
@@ -259,7 +282,7 @@ def process_document_for_rag(
 
     pieces = chunk_text(text)
     for piece in pieces:
-        embedding = get_embedding(piece)
+        embedding = get_embedding(piece, task_type="RETRIEVAL_DOCUMENT")
         db.add(models.DocumentChunk(
             document_id=document_id,
             organization_id=organization_id,
@@ -389,7 +412,7 @@ def retrieve_relevant_chunks(
     - Else if `project_id` is set, only that project's chunks are searched.
     - Else all org chunks are searched.
     """
-    query_embedding = get_embedding(question)
+    query_embedding = get_embedding(question, task_type="RETRIEVAL_QUERY")
 
     query = db.query(models.DocumentChunk).filter(
         models.DocumentChunk.organization_id == organization_id
@@ -484,9 +507,9 @@ def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Generation — swap this function's internals if you later use a different
-# provider (OpenAI, Claude, Gemini). Nothing else in the RAG pipeline needs
-# to change since everything else calls call_llm(), not Groq directly.
+# Generation — Groq is used for the final answer. Nothing else in the RAG
+# pipeline needs to change since everything else calls call_llm(), not Groq
+# directly.
 # ---------------------------------------------------------------------------
 
 def call_llm(prompt: str) -> str:
@@ -513,12 +536,11 @@ def call_llm(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 def warmup_embedding_model() -> None:
-    """Load the embedding model once so the first chat is not a multi-minute wait."""
+    """Make one cheap embedding call at startup so the first real chat isn't
+    the one paying for client init / first-call latency."""
     try:
-        _get_embedding_model()
-        # Tiny encode to fully initialize weights / device.
-        get_embedding("warmup")
-        print("RAG embedding model warmed up.")
+        get_embedding("warmup", task_type="RETRIEVAL_QUERY")
+        print("RAG embedding client warmed up.")
     except Exception as exc:  # pragma: no cover
         print(f"RAG embedding warmup skipped: {exc}")
 
