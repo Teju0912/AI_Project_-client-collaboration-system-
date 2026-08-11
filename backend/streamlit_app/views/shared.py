@@ -55,6 +55,43 @@ def session_user():
 _RAG_SUPPORTED_EXTS = (".pdf", ".docx", ".pptx", ".txt", ".csv", ".md", ".log")
 
 
+
+#------------Avi add ------------------------------
+
+
+def rag_index_caption(doc: dict) -> str:
+    """Human-readable RAG indexing status for a document row."""
+    chunks = int(doc.get("chunk_count") or 0)
+    if chunks > 0:
+        return f"RAG indexed · {chunks} chunk{'s' if chunks != 1 else ''}"
+    return "Not indexed for chat — use Reindex (PDF/DOCX/PPTX/TXT)"
+
+
+def render_reindex_button(token: str, doc: dict, *, key: str) -> None:
+    """Button that re-runs RAG extraction + embedding for one document."""
+    if not st.button("Reindex", key=key, use_container_width=True):
+        return
+    with st.spinner(f"Indexing {doc.get('filename', 'document')}…"):
+        resp = reindex_document(token, str(doc["id"]))
+    if resp.status_code == 200:
+        data = resp.json()
+        chunks = data.get("chunks_indexed", 0)
+        if chunks:
+            st.success(f"Indexed {chunks} chunk(s). Available in AI Chat.")
+        else:
+            st.warning(
+                "No text extracted. Use PDF, DOCX, PPTX, TXT, CSV, or MD."
+            )
+        st.rerun()
+    else:
+        show_api_error(resp)
+
+
+
+
+
+
+
 def rag_status_label(doc: dict) -> str:
     """Human-readable RAG indexing status for a document list row."""
     chunks = int(doc.get("chunk_count") or 0)

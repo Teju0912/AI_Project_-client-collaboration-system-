@@ -4,16 +4,23 @@ SQLAlchemy table definitions. Every table (except organizations itself)
 carries organization_id — this is what makes multi-tenant SaaS possible
 later without a schema rewrite. Add new tables here following this same
 pattern (Project, Task, Document, etc.) as you build later modules.
+
+CHANGE LOG (Jira-style Tasks tab):
+  - Task: added priority, story_points, labels, parent_task_id (sub-tasks)
+  - NEW:  TaskComment  (activity / comment feed on an issue)
+  - NEW:  TaskLink     (linked issues: "blocks", "relates to", etc.)
+
+After merging these changes into your real models.py, run:
+    alembic revision --autogenerate -m "jira-style task fields"
+    alembic upgrade head
 """
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, JSON, Numeric, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, JSON, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text
 
 from database import Base, DATABASE_URL
 
@@ -103,12 +110,50 @@ class Task(Base):
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    epic = Column(String(255), nullable=True)
     status = Column(String(50), nullable=False, default="todo")
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    # Optional epic name to group stories under a larger epic. Not a foreign-key to keep schema simple.
-    epic = Column(String(255), nullable=True)
+
+    # ---- NEW: Jira-style fields ----
+    # one of: "low", "medium", "high", "urgent"
+    priority = Column(String(20), nullable=False, default="medium")
+    # story point estimate (Jira uses fractional values e.g. 0.5, 1, 2, 3, 5, 8...)
+    story_points = Column(Numeric(5, 1), nullable=True)
+    # simple list of strings, e.g. ["frontend", "bug"]
+    labels = Column(JSON, nullable=False, default=list)
+    # self-referencing FK -> lets a Task be a sub-task of another Task
+    parent_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True, index=True)
+
+
+class TaskComment(Base):
+    """Comment / activity feed entry on a task (Jira-style issue comments)."""
+    __tablename__ = "task_comments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TaskLink(Base):
+    """
+    A directed link between two tasks, Jira-style ("blocks", "is blocked by",
+    "relates to", "duplicates"). Stored as one row per link; the UI renders
+    it from the perspective of `task_id`.
+    """
+    __tablename__ = "task_links"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    linked_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    link_type = Column(String(50), nullable=False, default="relates to")
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Document(Base):
@@ -121,13 +166,6 @@ class Document(Base):
     storage_path = Column(String(500), nullable=False)
     uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-
-    chunks = relationship(
-        "DocumentChunk",
-        back_populates="document",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
 
 
 class DocumentChunk(Base):
@@ -146,9 +184,6 @@ class DocumentChunk(Base):
     chunk_text = Column(Text, nullable=False)
     embedding = _embedding_column()  # all-MiniLM-L6-v2 = 384 dimensions
     created_at = Column(DateTime, default=datetime.utcnow)
-
-    document = relationship("Document", back_populates="chunks")
-
 
 
 class WeeklyReport(Base):
@@ -170,7 +205,7 @@ class WeeklyReport(Base):
 
     report_text = Column(Text, nullable=False)
 
-    created_at = Column(DateTime, default=datetime.utcnow)    
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Meeting(Base):
     __tablename__ = "meetings"
@@ -188,26 +223,42 @@ class Meeting(Base):
     status = Column(String(50), nullable=False, default="processing")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
 class AIUsageLog(Base):
+    """
+    Audit log of every AI call made through call_llm wrappers. Each row is
+    one LLM invocation (or a fallback when no API key is configured), tagged
+    with feature="..." so we can report per-feature API usage.
+    """
     __tablename__ = "ai_usage_log"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    feature = Column(String(255), nullable=False)
-    tokens_used = Column(Integer, nullable=False, default=0)
-    cost_estimate = Column(Float, nullable=False, default=0.0)
-    latency_ms = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)    
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    feature = Column(String(100), nullable=False)
+    model = Column(String(100), nullable=True)
+    prompt_tokens = Column(String(50), nullable=True)
+    completion_tokens = Column(String(50), nullable=True)
+    status = Column(String(50), nullable=False, default="success")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class RequirementAnalysis(Base):
+    """
+    Stored result of an AI requirement analysis run. The LLM's structured
+    Epics -> Stories -> Tasks breakdown is saved here in status
+    "pending_review" until a human explicitly approves (creates real
+    Project/Task rows) or rejects it. Nothing is written to the tasks table
+    until that explicit Approve action.
+    """
     __tablename__ = "requirement_analyses"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=True)
     raw_output = Column(JSON, nullable=False)
-    status = Column(String(50), nullable=False, default="pending_review")  # pending_review | approved | rejected
+    status = Column(String(50), nullable=False, default="pending_review")
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -221,6 +272,8 @@ class RequirementAnalysis(Base):
 #   class Task(Base): ...           (Module 4 — needs project_id, assigned_to) [DONE]
 #   class Document(Base): ...       (Module 5 — needs project_id, file_url)   [DONE]
 #   class DocumentChunk(Base): ...  (RAG — chunk_text, embedding vector)      [DONE]
+#   class TaskComment(Base): ...    (Jira-style issue comments)               [DONE]
+#   class TaskLink(Base): ...       (Jira-style linked issues)                [DONE]
 #
 # After adding a table, always run:
 #   alembic revision --autogenerate -m "add <table> table"

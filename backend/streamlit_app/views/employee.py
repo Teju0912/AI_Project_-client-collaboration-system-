@@ -1,10 +1,12 @@
 """
 employee.py
-Employee interface: My Work dashboard, My Tasks (kanban with status updates
-for own tasks), My Projects (read-only), and Documents (view/download/preview
-+ upload to assigned projects).
+Employee interface: Dashboard, My Tasks (status workflow for own tasks),
+My Projects (read-only), and Documents (view/download/preview + upload to
+assigned projects).
 
-Matches the dark "AI Project OS" theme used in admin.py / manager.py.
+Design system matches admin.py exactly: same _inject_light_theme() CSS
+(flat white cards, soft border + shadow, violet accents), same _stat_card
+helper for summary boxes, and the same emoji-prefixed sidebar nav style.
 
 PERMISSIONS: employees cannot create/edit/delete projects or assign tasks.
 They can advance status on tasks assigned to them. Documents can be viewed,
@@ -35,7 +37,6 @@ from views.shared import (
     session_token,
     session_user,
     rag_status_label,
-    trigger_reindex,
 )
 
 STATUS_META = {
@@ -43,14 +44,6 @@ STATUS_META = {
     "in_progress": {"label": "In Progress", "icon": "🔵", "color": "#3B82F6"},
     "testing":     {"label": "Testing",     "icon": "🟠", "color": "#F59E0B"},
     "done":        {"label": "Done",        "icon": "🟢", "color": "#22C55E"},
-}
-# Phase -> completion % used for the per-task rings on the Dashboard's
-# "My Completion" card (e.g. a task in "Testing" shows as 75%).
-PHASE_PERCENT = {
-    "todo": 25,
-    "in_progress": 50,
-    "testing": 75,
-    "done": 100,
 }
 PROJECT_STATUS_META = {
     "planning":  {"label": "Planning",  "color": "#8B5CF6"},
@@ -68,77 +61,269 @@ PROJECT_WIDGET_KEY = "employee_project_dropdown_shared"
 # doesn't interfere with the shared "All Projects" filter used elsewhere.
 MY_PROJECTS_WIDGET_KEY = "employee_myprojects_dropdown"
 
+# Sidebar nav — emoji-prefixed labels, same convention as admin.py's
+# NAV_PAGES. The radio widget key is fixed so page selection can be
+# programmatically set (e.g. from a "View all" button) the same way
+# admin.py's _go_to() does, if that's ever wired up here too.
+NAV_PAGES = ["🏠 Dashboard", "✅ My Tasks", "📁 My Projects", "📄 Documents"]
+NAV_RADIO_KEY = "employee_nav_radio"
+
 
 # --------------------------------------------------------------------------
-# DARK THEME (same look as admin/manager)
+# LIGHT THEME — brand/component CSS on top of Streamlit's light base
+# (.streamlit/config.toml). Cards, sidebar nav, popovers, uploaders, and
+# inputs stay explicitly light with dark readable text.
 # --------------------------------------------------------------------------
-def _inject_dark_theme():
-    st.markdown("""
-    <style>
-    .stApp { background-color: #0B0F1A; }
-    .block-container { padding-top: 1.5rem; padding-bottom: 3rem; }
+def _inject_light_theme():
+    css_lines = [
+        "<style>",
+        ".stApp { background: #F7F8FA; }",
+        "[data-testid='stHeader'] { background-color: #F8F9FF !important; }",
+        "[data-testid='stToolbar'] { background-color: transparent !important; }",
+        "[data-testid='stDecoration'] { background-image: none !important; background-color: #F8F9FF !important; }",
+        "[data-testid='stAppViewContainer'] { background-color: #F8F9FF !important; }",
+        "[data-testid='stMain'] { background-color: transparent !important; }",
+        ".block-container { padding-top: 1.5rem; padding-bottom: 3rem; }",
+        "",
+        "h1, h2, h3, h4, h5, h6, p, span, label, li, div, .stMarkdown { color: #111827 !important; }",
+        "[data-testid='stMarkdownContainer'], [data-testid='stMarkdownContainer'] * { color: #111827 !important; }",
+        "[data-testid='stHeadingWithActionElements'], [data-testid='stHeadingWithActionElements'] * { color: #111827 !important; }",
+        ".stCaption, [data-testid='stCaptionContainer'], [data-testid='stCaptionContainer'] * { color: #4B5563 !important; font-weight: 500; }",
+        "[data-testid='stWidgetLabel'] p { color: #111827 !important; }",
+        "",
+        "section[data-testid='stSidebar'] {",
+        "    background: #FFFFFF;",
+        "    border-right: 1px solid #EEF0F3;",
+        "}",
+        "section[data-testid='stSidebar'] * { color: #374151 !important; }",
+        "section[data-testid='stSidebar'] code {",
+        "    background: #E0E7FF !important;",
+        "    color: #312E81 !important;",
+        "    border: 1px solid #C7D2FE !important;",
+        "    border-radius: 5px !important;",
+        "    padding: 2px 6px !important;",
+        "}",
+        "",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] {",
+        "    display: flex; flex-direction: column; gap: 2px;",
+        "}",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label {",
+        "    background-color: transparent; border: none; border-radius: 8px;",
+        "    padding: 9px 12px !important; margin: 0 !important; cursor: pointer;",
+        "}",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label:hover {",
+        "    background-color: #F3F4F6;",
+        "}",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label:has(input:checked) {",
+        "    background-color: #EEF2FF !important;",
+        "    border-left: 3px solid #4F46E5 !important;",
+        "}",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label:has(input:checked),",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label:has(input:checked) p,",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label:has(input:checked) span {",
+        "    color: #312E81 !important; font-weight: 600;",
+        "}",
+        "/* Hide the radio indicator; the whole navigation row remains clickable. */",
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label > div:first-child { display: none !important; }",
+        "",
+        "div[data-testid='stVerticalBlockBorderWrapper'] {",
+        "    background-color: #FFFFFF !important;",
+        "    border: 1px solid #EEF0F3 !important;",
+        "    border-radius: 14px !important;",
+        "    box-shadow: 0 1px 2px rgba(16,24,40,0.04);",
+        "    padding: 0.35rem;",
+        "}",
+        "",
+        "div[data-testid='stMetricValue'] { font-weight: 700; color: #111827 !important; }",
+        "div[data-testid='stMetricLabel'] { color: #6B7280 !important; }",
+        "",
+        ".stButton button {",
+        "    background-color: #FFFFFF; color: #374151;",
+        "    border: 1px solid #E5E7EB; border-radius: 8px;",
+        "}",
+        ".stButton button:hover { border-color: #4F46E5; color: #4338CA; }",
+        ".stButton button[kind='primary'] {",
+        "    background-color: #4F46E5; color: #FFFFFF !important; border: 1px solid #4F46E5;",
+        "}",
+        ".stButton button[kind='primary']:hover { background-color: #4338CA; border-color: #4338CA; }",
+        ".stButton button[kind='primary'] p { color: #FFFFFF !important; }",
+        ".stButton button p, .stButton button span { color: inherit !important; }",
+        ".stButton button[kind='primary'] p, .stButton button[kind='primary'] span { color: #FFFFFF !important; }",
+        "/* Download controls and document previews must stay light/readable. */",
+        ".stDownloadButton button {",
+        "    background-color: #FFFFFF !important; color: #374151 !important;",
+        "    border: 1px solid #E5E7EB !important; border-radius: 8px !important;",
+        "}",
+        ".stDownloadButton button:hover { border-color: #4F46E5 !important; color: #4338CA !important; }",
+        ".stDownloadButton button * { color: inherit !important; }",
+        "[data-testid='stCodeBlock'], [data-testid='stCodeBlock'] pre, pre, code {",
+        "    background-color: #FFFFFF !important; color: #111827 !important;",
+        "    border: 1px solid #E5E7EB !important; border-radius: 8px !important;",
+        "}",
+        "[data-testid='stJson'], [data-testid='stJson'] * { background-color: #FFFFFF !important; color: #111827 !important; }",
+        "[data-testid='stText'] pre { background-color: #FFFFFF !important; color: #111827 !important; }",
+        "[data-testid='stDialog'], [data-testid='stDialog'] > div { background-color: #FFFFFF !important; }",
+        "[data-testid='stDialog'] * { color: #111827 !important; }",
+        "iframe, [data-testid='stImage'] { background-color: #FFFFFF !important; border-radius: 8px !important; }",
+        "/* Forms and uploader panels: never inherit a dark browser surface. */",
+        "div[data-testid='stAlert'] { background-color: #F9FAFB !important; border-radius: 10px !important; }",
+        "div[data-testid='stAlert'] * { color: #111827 !important; }",
+        "[data-testid='stFileUploaderDropzone'] { background-color: #F9FAFB !important; border: 1px dashed #D1D5DB !important; }",
+        "[data-testid='stFileUploaderDropzone'] * { color: #374151 !important; }",
+        "[data-testid='stFileUploaderFile'] { background-color: #FFFFFF !important; border: 1px solid #E5E7EB !important; border-radius: 8px !important; }",
+        "[data-testid='stFileUploaderFile'] * { color: #111827 !important; }",
+        "[data-testid='stFileUploaderDropzone'] button, [data-testid='stFileUploader'] button { background-color: #FFFFFF !important; color: #374151 !important; border: 1px solid #E5E7EB !important; }",
+        ".stTextInput input, .stTextArea textarea { background-color: #FFFFFF !important; color: #111827 !important; border-color: #E5E7EB !important; }",
+        "",
+        ".stProgress > div > div > div > div { border-radius: 6px; }",
+        ".stProgress > div > div { background-color: #F3F4F6; border-radius: 6px; }",
+        "",
+        "[data-testid='stDataFrame'] { color: #111827 !important; }",
+        "",
+        ".icon-badge {",
+        "    width: 44px; height: 44px; border-radius: 12px;",
+        "    display: flex; align-items: center; justify-content: center;",
+        "    font-size: 1.25rem; margin-bottom: 0.5rem;",
+        "}",
+        ".status-pill {",
+        "    display: inline-block; padding: 2px 10px; border-radius: 999px;",
+        "    font-size: 0.75rem; font-weight: 600;",
+        "}",
+        ".completion-vdivider {",
+        "    width: 1px; height: 100%; min-height: 220px;",
+        "    background-color: #EEF0F3; margin: 0 auto;",
+        "}",
+        ".completion-hdivider {",
+        "    border: none; border-top: 1px solid #EEF0F3; margin: 0.75rem 0;",
+        "}",
+        "",
+        "div[data-testid='stExpander'] {",
+        "    border: 1px solid #EEF0F3 !important;",
+        "    border-radius: 14px !important;",
+        "    background-color: #FFFFFF !important;",
+        "}",
+        "hr { border-color: #EEF0F3 !important; }",
+        "",
+        "div[data-testid='stPopover'] button {",
+        "    background-color: #FFFFFF !important; color: #374151 !important;",
+        "    border: 1px solid #E5E7EB !important;",
+        "}",
+        "div[data-baseweb='popover'] { z-index: 999999 !important; }",
+        "div[data-testid='stPopoverBody'], div[data-baseweb='popover'] > div {",
+        "    background-color: #FFFFFF !important;",
+        "    border: 1px solid #E5E7EB !important;",
+        "    border-radius: 10px !important;",
+        "    box-shadow: 0 8px 24px rgba(16,24,40,0.14) !important;",
+        "}",
+        "div[data-testid='stPopoverBody'] * { color: #111827 !important; }",
+        "",
+        "div[data-baseweb='popover'] div[data-baseweb='menu'],",
+        "div[data-baseweb='popover'] ul[role='listbox'] {",
+        "    background-color: #FFFFFF !important;",
+        "    border: 1px solid #E5E7EB !important;",
+        "    border-radius: 10px !important;",
+        "    box-shadow: 0 8px 24px rgba(16,24,40,0.14) !important;",
+        "    padding: 4px !important;",
+        "}",
+        "div[data-baseweb='popover'] li[role='option'],",
+        "div[data-baseweb='popover'] li {",
+        "    background-color: #FFFFFF !important; color: #111827 !important; border-radius: 6px !important;",
+        "}",
+        "div[data-baseweb='popover'] li[role='option']:hover,",
+        "div[data-baseweb='popover'] li:hover {",
+        "    background-color: #F3F4F6 !important; color: #111827 !important;",
+        "}",
+        "div[data-baseweb='popover'] li[aria-selected='true'] {",
+        "    background-color: #EEF2FF !important; color: #4338CA !important; font-weight: 600;",
+        "}",
+        "div[data-baseweb='popover'] li[role='option'] * { color: inherit !important; }",
+        "",
+        "div[data-baseweb='select'] > div {",
+        "    background-color: #FFFFFF !important; border-color: #E5E7EB !important;",
+        "    color: #111827 !important; border-radius: 8px !important;",
+        "}",
+        "div[data-baseweb='select'] > div:hover { border-color: #4F46E5 !important; }",
+        "div[data-baseweb='select'] input { color: #111827 !important; }",
+        "div[data-baseweb='select'] svg { fill: #6B7280 !important; }",
+        "div[data-baseweb='select'] span { color: #111827 !important; }",
+        "",
+        "/* Selectbox virtual dropdown list (Streamlit renders this in a",
+        "   separate virtualized container the generic popover rules above",
+        "   don't reach). */",
+        "div[data-testid='stSelectboxVirtualDropdown'] { background-color: #FFFFFF !important; }",
+        "div[data-testid='stSelectboxVirtualDropdown'] * { background-color: #FFFFFF !important; color: #111827 !important; }",
+        "div[data-testid='stSelectboxVirtualDropdown'] li:hover,",
+        "div[data-testid='stSelectboxVirtualDropdown'] div[aria-selected='true'] { background-color: #F3F4F6 !important; }",
+        "",
+        "span[data-baseweb='tag'] {",
+        "    background-color: #EEF2FF !important; color: #4338CA !important; border-radius: 6px !important;",
+        "}",
+        "span[data-baseweb='tag'] span { color: #4338CA !important; }",
+        "span[data-baseweb='tag'] svg { fill: #4338CA !important; }",
+        "",
+        "div[data-baseweb='calendar'] { background-color: #FFFFFF !important; }",
+        "div[data-baseweb='calendar'] * { color: #111827 !important; }",
+        "</style>",
+    ]
+    st.markdown("\n".join(css_lines), unsafe_allow_html=True)
 
-    h1, h2, h3, h4, p, span, label, .stMarkdown { color: #E5E7EB !important; }
-    .stCaption, [data-testid="stCaptionContainer"] { color: #9CA3AF !important; }
 
-    section[data-testid="stSidebar"] {
-        background-color: #111527;
-        border-right: 1px solid #1F2937;
-    }
-    section[data-testid="stSidebar"] * { color: #D1D5DB !important; }
+# --------------------------------------------------------------------------
+# Shared visual helpers — copied 1:1 from admin.py so both roles render
+# identically-styled cards, badges, and pills.
+# --------------------------------------------------------------------------
+def _icon_badge(icon, bg):
+    st.markdown(f"<div class='icon-badge' style='background:{bg};'>{icon}</div>", unsafe_allow_html=True)
 
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: #131A2E !important;
-        border: 1px solid #1F2937 !important;
-        border-radius: 16px !important;
-        padding: 0.4rem;
-    }
 
-    div[data-testid="stMetricValue"] { color: #F9FAFB !important; font-weight: 700; }
-    div[data-testid="stMetricLabel"] { color: #9CA3AF !important; }
-
-    .stButton button {
-        background-color: #1B2138;
-        color: #E5E7EB;
-        border: 1px solid #2A3350;
-        border-radius: 10px;
-    }
-    .stButton button:hover { border-color: #6366F1; color: #fff; }
-
-    .stProgress > div > div > div > div { border-radius: 6px; }
-    .stProgress > div > div { background-color: #1F2937; border-radius: 6px; }
-
-    div[role="radiogroup"] label { color: #D1D5DB !important; }
-
-    .icon-badge {
-        width: 44px; height: 44px; border-radius: 12px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 1.3rem; margin-bottom: 0.4rem;
-    }
-    .status-pill {
-        display: inline-block; padding: 2px 10px; border-radius: 999px;
-        font-size: 0.75rem; font-weight: 600;
-    }
-    .completion-vdivider {
-        width: 1px;
-        height: 100%;
-        min-height: 220px;
-        background-color: #1F2937;
-        margin: 0 auto;
-    }
-    .completion-hdivider {
-        border: none;
-        border-top: 1px solid #1F2937;
-        margin: 0.75rem 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+def _color_dot(color, size=10):
+    return (
+        f"<span style='display:inline-block;width:{size}px;height:{size}px;"
+        f"border-radius:50%;background-color:{color};vertical-align:middle;'></span>"
+    )
 
 
 def _pill(text, color):
     st.markdown(
-        f'<span class="status-pill" style="background:{color}22;color:{color};'
-        f'border:1px solid {color}55;">{text}</span>',
+        f"<span class='status-pill' style='background:{color}1A;color:{color} !important;"
+        f"border:1px solid {color}55;'>{text}</span>",
+        unsafe_allow_html=True,
+    )
+
+
+def _stat_card(icon, bg, label, value, sublabel, key=None):
+    """Flat white stat card: icon badge, label, big value, small caption.
+    Identical sizing/spacing to admin.py's _stat_card — this is what
+    keeps the Dashboard boxes the same size as the admin dashboard's."""
+    with st.container(border=True, key=key):
+        _icon_badge(icon, bg)
+        st.markdown(f"<div style='color:#6B7280; font-size:0.82rem;'>{label}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:1.6rem; font-weight:700; color:#111827;'>{value}</div>",
+                    unsafe_allow_html=True)
+        st.caption(sublabel)
+
+
+def _inject_stat_card_hover_css():
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-stat-card-"] {
+            background-color: #FFFFFF !important;
+            border: 1.5px solid #D8DCE5 !important;
+            border-radius: 14px !important;
+            box-shadow: 0 2px 6px rgba(16,24,40,0.08) !important;
+            transition: transform 0.15s ease, box-shadow 0.15s ease,
+                        border-color 0.15s ease, background-color 0.15s ease;
+            cursor: pointer;
+        }
+        div[class*="st-key-stat-card-"]:hover {
+            background-color: #F5F3FF !important;
+            border-color: #818CF8 !important;
+            transform: translateY(-4px);
+            box-shadow: 0 12px 28px rgba(79,70,229,0.22) !important;
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -177,13 +362,13 @@ def _safe_json_list(response):
 def _ring(pct, color, height=170):
     fig = go.Figure(data=[go.Pie(
         values=[pct, 100 - pct], hole=0.72,
-        marker=dict(colors=[color, "#1F2937"]),
+        marker=dict(colors=[color, "#F1F5F9"]),
         textinfo="none", sort=False, direction="clockwise",
     )])
     fig.update_layout(
         showlegend=False, margin=dict(t=0, b=0, l=0, r=0), height=height,
         paper_bgcolor="rgba(0,0,0,0)",
-        annotations=[dict(text=f"<b style='font-size:16px;color:#F9FAFB'>{pct}%</b>",
+        annotations=[dict(text=f"<b style='font-size:16px;color:#111827'>{pct}%</b>",
                            x=0.5, y=0.5, showarrow=False)],
     )
     return fig
@@ -345,8 +530,6 @@ def _render_employee_dashboard(projects, token):
 
     st.write("")
 
-    # New employee with no projects yet — short onboarding message instead
-    # of a bare dashboard.
     if not projects:
         st.info(
             "You haven't been added to a project yet. Once your manager "
@@ -359,7 +542,9 @@ def _render_employee_dashboard(projects, token):
 
     tasks_resp, docs_resp = _load_scoped_data(token, active_project_id)
     tasks = _safe_json_list(tasks_resp)
-    documents = _safe_json_list(docs_resp)
+    # documents intentionally not shown on this page in the new design
+    # (the Documents tab already covers this) — response is still fetched
+    # via _load_scoped_data so that shared helper stays untouched.
 
     scoped_projects = (
         projects if active_project_id is None
@@ -367,138 +552,119 @@ def _render_employee_dashboard(projects, token):
     )
 
     done_n = sum(1 for t in tasks if (t.get("status") or "") == "done")
-    open_n = len(tasks) - done_n
+    pending_n = len(tasks) - done_n
     total_n = len(tasks) or 1
     completion_pct = round(100 * done_n / total_n)
+    overdue_n = sum(
+        1 for t in tasks
+        if (t.get("status") or "") != "done"
+        and _task_due_days(t) is not None
+        and _task_due_days(t) < 0
+    )
 
     st.write("")
 
+    # ---- Stat cards row: Total Tasks / Completed / Pending / Overdue ----
+    # Same _stat_card used across every page in admin.py — same box size,
+    # same icon-badge + label + value + caption layout.
+    _inject_stat_card_hover_css()
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        with st.container(border=True):
-            st.caption("📁 My Projects")
-            st.metric(label="My Projects", value=len(scoped_projects), label_visibility="collapsed")
+        _stat_card("📋", "#EDE9FE", "Total Tasks", len(tasks), "All assigned tasks", key="stat-card-emp-dash-0")
     with c2:
-        with st.container(border=True):
-            st.caption("✅ Assigned Tasks")
-            st.metric(label="Assigned Tasks", value=len(tasks), label_visibility="collapsed")
+        _stat_card("✅", "#DCFCE7", "Completed", done_n, "Marked done", key="stat-card-emp-dash-1")
     with c3:
-        with st.container(border=True):
-            st.caption("🔵 Open Tasks")
-            st.metric(label="Open Tasks", value=open_n, label_visibility="collapsed")
+        _stat_card("🟡", "#FEF9C3", "Pending", pending_n, "Still in progress", key="stat-card-emp-dash-2")
     with c4:
-        with st.container(border=True):
-            st.caption("📄 Documents")
-            st.metric(label="Documents", value=len(documents), label_visibility="collapsed")
+        _stat_card("🔴", "#FEE2E2", "Overdue", overdue_n, "Past due date", key="stat-card-emp-dash-3")
 
     st.write("")
 
-    # --- My Completion:
-    #   1) Phase legend (To Do / In Progress / Testing / Done)
-    #   2) --- horizontal divider line ---
-    #   3) Two boxes split by a static vertical divider line:
-    #        LEFT  = compact rings (graph), one per task, colored/percented
-    #                by phase. New tasks automatically get their own ring
-    #                since this loops over the live `tasks` list.
-    #        RIGHT = plain list of every task with its name and % done.
-    # Each ring chart gets a unique `key` (based on the task id) — without
-    # it, two tasks sharing the same status/phase produce visually
-    # identical charts with no distinguishing args, which Streamlit can't
-    # tell apart and raises StreamlitDuplicateElementId.
-    # (Needs Attention card removed; bell stays in the header as before.) ---
+    # ---- Performance: one overall ring + simple Completed/Pending legend ----
     with st.container(border=True):
-        st.subheader("My Completion")
+        st.subheader("Performance")
         if not tasks:
             st.info("No tasks assigned yet for this selection.")
         else:
-            st.caption("Each ring shows how far along that task is in the workflow.")
-
-            legend_cols = st.columns(len(STATUS_META))
-            for col, key in zip(legend_cols, STATUS_META):
-                meta = STATUS_META[key]
-                with col:
-                    st.markdown(
-                        f"{meta['icon']} **{meta['label']}** — {PHASE_PERCENT[key]}%"
-                    )
-
-            # Horizontal line separating the phase legend from the
-            # graph/list section below it, so it's clear the legend is
-            # separate from the per-task data underneath.
-            _horizontal_divider()
-
-            graph_box, divider_box, list_box = st.columns([2.2, 0.15, 1.4])
-
-            with graph_box:
-                per_row = 3
-                for i in range(0, len(tasks), per_row):
-                    row_tasks = tasks[i:i + per_row]
-                    cols = st.columns(per_row)
-                    for j, (col, t) in enumerate(zip(cols, row_tasks)):
-                        sk = t.get("status") or "todo"
-                        sk = sk if sk in STATUS_META else "todo"
-                        meta = STATUS_META[sk]
-                        pct = PHASE_PERCENT[sk]
-                        with col:
-                            # Unique key: task id if present, else the
-                            # absolute index in the tasks list as a
-                            # fallback (guards against missing/duplicate
-                            # ids in the API response).
-                            ring_key = f"employee_completion_ring_{t.get('id', i + j)}"
-                            st.plotly_chart(
-                                _ring(pct, meta["color"], height=100),
-                                use_container_width=True,
-                                config={"displayModeBar": False},
-                                key=ring_key,
-                            )
-                            st.caption(f"**{t.get('title', '—')}** · {meta['icon']} {meta['label']}")
-
-            with divider_box:
-                _vertical_divider()
-
-            with list_box:
-                st.markdown("**Task list**")
-                for t in tasks:
-                    sk = t.get("status") or "todo"
-                    sk = sk if sk in STATUS_META else "todo"
-                    meta = STATUS_META[sk]
-                    pct = PHASE_PERCENT[sk]
-                    st.markdown(
-                        f"{meta['icon']} **{t.get('title', '—')}** — {pct}%"
-                    )
-
-            st.caption(f"{done_n} of {len(tasks)} tasks fully done ({completion_pct}% overall)")
+            ring_col, legend_col = st.columns([1, 1.4])
+            with ring_col:
+                st.plotly_chart(
+                    _ring(completion_pct, "#4F46E5", height=170),
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                    key="employee_performance_ring",
+                )
+                st.caption(f"{done_n} of {len(tasks)} tasks completed")
+            with legend_col:
+                st.write("")
+                st.write("")
+                st.markdown(
+                    f"<span style='color:#4F46E5;font-size:1.1rem;'>●</span> "
+                    f"&nbsp; **Completed task** — {done_n}",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<span style='color:#CBD5E1;font-size:1.1rem;'>●</span> "
+                    f"&nbsp; **Pending task** — {pending_n}",
+                    unsafe_allow_html=True,
+                )
 
     st.write("")
 
-    dl_col, doc_col = st.columns(2)
-    with dl_col:
-        with st.container(border=True):
-            st.subheader("⏳ Deadlines")
-            dated = [
-                (p["name"], p.get("deadline"), _days_left(p.get("deadline")))
-                for p in scoped_projects if p.get("deadline")
-            ]
-            dated = [d for d in dated if d[2] is not None]
-            dated.sort(key=lambda d: d[2])
-            if not dated:
-                st.caption("No deadlines to show.")
-            else:
-                for name, deadline, days in dated[:5]:
-                    tag = "🔴 overdue" if days < 0 else ("🟠 soon" if days <= 3 else "🟢 on track")
-                    st.markdown(f"**{name}** — {deadline} ({days}d) — {tag}")
+    # ---- Project Information ----
+    with st.container(border=True):
+        st.subheader("Project Information")
 
-    with doc_col:
-        with st.container(border=True):
-            st.subheader("📄 Recent Documents")
-            if not documents:
-                st.caption("No documents yet.")
+        if active_project_id is None:
+            selected_name = st.selectbox(
+                "📁 Project", [p["name"] for p in projects],
+                key="employee_dashboard_project_info_select",
+            )
+            info_project = next(p for p in projects if p["name"] == selected_name)
+        else:
+            info_project = scoped_projects[0]
+            st.caption(f"📁 {info_project.get('name', '—')}")
+
+        pct, done, total = _project_task_progress(info_project.get("id"), tasks)
+
+        name_col, progress_col, deadline_col = st.columns([2, 1.4, 1.2])
+        with name_col:
+            st.markdown("**Project name**")
+            st.write(info_project.get("name", "—"))
+        with progress_col:
+            st.markdown("**Progress**")
+            if pct is not None:
+                st.progress(pct / 100, text=f"{pct}% · {done}/{total} of your tasks")
             else:
-                for doc in documents[:5]:
-                    st.write(f"- {doc.get('filename', '—')}")
+                st.caption("No linked tasks yet.")
+        with deadline_col:
+            st.markdown("**Deadline**")
+            days_left = _days_left(info_project.get("deadline"))
+            deadline_text = info_project.get("deadline", "—")
+            if days_left is not None:
+                tag = "🔴 overdue" if days_left < 0 else ("🟠 soon" if days_left <= 3 else "🟢 on track")
+                st.write(f"{deadline_text} ({days_left}d) — {tag}")
+            else:
+                st.write(deadline_text)
+
+        st.markdown("**Team**")
+        team_resp = get_team(token, info_project.get("id"))
+        if team_resp.status_code == 200:
+            try:
+                team = team_resp.json()
+            except Exception:
+                team = []
+            if team:
+                for member in team:
+                    st.write(f"- {member.get('name', '—')} · `{member.get('role', '—')}`")
+            else:
+                st.caption("No team members listed.")
+        else:
+            show_api_error(team_resp)
 
 
 # --------------------------------------------------------------------------
-# MY TASKS — kanban with status move (assignee can update own tasks)
+# MY TASKS — status workflow (assignee can update own tasks)
 # --------------------------------------------------------------------------
 def _render_employee_tasks(projects, token):
     st.title("✅ My Tasks")
@@ -523,43 +689,79 @@ def _render_employee_tasks(projects, token):
         sk = t.get("status") or "todo"
         grouped[sk if sk in grouped else "todo"].append(t)
 
-    status_keys = list(STATUS_META.keys())
-    cols = st.columns(len(status_keys))
-    for col, key in zip(cols, status_keys):
+    # ---- Status count row — same _stat_card boxes as the Dashboard, one
+    # per workflow stage (To Do / In Progress / Testing / Done). ----
+    status_bg = {
+        "todo": "#EDE9FE", "in_progress": "#DBEAFE",
+        "testing": "#FEF3C7", "done": "#DCFCE7",
+    }
+    st.write("")
+    _inject_stat_card_hover_css()
+    status_cols = st.columns(4)
+    for i, (col, key) in enumerate(zip(status_cols, STATUS_META)):
         meta = STATUS_META[key]
         with col:
-            st.markdown(f"**{meta['icon']} {meta['label']}** · {len(grouped[key])}")
-            if not grouped[key]:
-                st.caption("—")
-            for t in grouped[key]:
-                with st.container(border=True):
+            _stat_card(meta["icon"], status_bg[key], meta["label"], len(grouped[key]), "Tasks in this stage", key=f"stat-card-emp-tasks-{i}")
+    st.write("")
+
+    # ---- One expandable section per workflow stage.
+    #   To Do        -> Accept            (todo -> in_progress)
+    #   In Progress  -> Submit for Review  (in_progress -> testing)
+    #   Testing      -> waiting on manager, no button
+    #   Done         -> no button
+    # Employees never set a task to Done themselves — that's the
+    # manager's call after reviewing it in Testing.
+    for key in STATUS_META:
+        meta = STATUS_META[key]
+        section_tasks = grouped[key]
+        with st.expander(
+            f"{meta['icon']} {meta['label']}  ·  {len(section_tasks)}",
+            expanded=(key in ("todo", "in_progress")),
+        ):
+            if not section_tasks:
+                st.caption("No tasks here.")
+                continue
+
+            for t in section_tasks:
+                pid = t.get("project_id")
+                proj_name = name_by_id.get(str(pid), "Project") if pid else "—"
+                days = _task_due_days(t)
+
+                row = st.columns([3, 1.4, 1.3])
+                with row[0]:
                     st.markdown(f"**{t.get('title', '—')}**")
-                    pid = t.get("project_id")
-                    if pid:
-                        st.caption(f"📁 {name_by_id.get(str(pid), 'Project')}")
-                    if t.get("description"):
-                        st.caption(t["description"])
-                    days = _task_due_days(t)
+                    st.caption(f"📁 {proj_name}")
+                with row[1]:
                     if days is not None and key != "done":
-                        tag = "🔴 overdue" if days < 0 else ("🟠 due soon" if days <= 3 else "🟢 on track")
-                        st.caption(f"{tag} · {abs(days)}d")
-                    if key != "done":
-                        keys_order = list(STATUS_META.keys())
-                        idx = keys_order.index(key)
-                        next_key = keys_order[idx + 1]
-                        if st.button(
-                            f"Move to {STATUS_META[next_key]['label']} →",
-                            key=f"emp_move_{t['id']}",
-                            use_container_width=True,
-                        ):
-                            resp = patch_task_status(
-                                token, str(t["id"]), {"status": next_key}
-                            )
+                        tag_color = "#EF4444" if days < 0 else ("#F59E0B" if days <= 3 else "#22C55E")
+                        tag_text = "overdue" if days < 0 else ("due soon" if days <= 3 else "on track")
+                        st.markdown(
+                            f"<span style='font-size:0.78rem;color:{tag_color};font-weight:600;'>"
+                            f"● {tag_text} · {abs(days)}d</span>",
+                            unsafe_allow_html=True,
+                        )
+                with row[2]:
+                    if key == "todo":
+                        if st.button("✅ Accept", key=f"accept_{t['id']}", use_container_width=True, type="primary"):
+                            resp = patch_task_status(token, str(t["id"]), {"status": "in_progress"})
                             if resp.status_code == 200:
-                                st.success("Status updated.")
+                                st.success("Task accepted — moved to In Progress.")
                                 st.rerun()
                             else:
                                 show_api_error(resp)
+                    elif key == "in_progress":
+                        if st.button("📤 Submit for Review", key=f"submit_{t['id']}", use_container_width=True, type="primary"):
+                            resp = patch_task_status(token, str(t["id"]), {"status": "testing"})
+                            if resp.status_code == 200:
+                                st.success("Sent to your manager for review.")
+                                st.rerun()
+                            else:
+                                show_api_error(resp)
+                    elif key == "testing":
+                        st.caption("⏳ In review for manager")
+                    else:
+                        st.caption("✅ Completed")
+                st.divider()
 
 
 # --------------------------------------------------------------------------
@@ -629,15 +831,14 @@ def _render_employee_projects(projects, token):
 
 # --------------------------------------------------------------------------
 # DOCUMENTS — upload + view/download/preview, scoped to own projects
+# (Reindex button removed — employees no longer trigger re-indexing.)
 # --------------------------------------------------------------------------
 def _render_employee_documents(projects, token):
     st.title("📄 Documents")
     st.caption("View and download project documents. Upload files to projects you're on.")
-
-    active_project_id, project_label = _choose_active_project(projects)
-    st.caption(f"Showing: **{project_label}**")
     st.write("")
 
+    # ---- Upload -------------------------------------------------------
     with st.container(border=True):
         st.subheader("⬆️ Upload a document")
         if not projects:
@@ -648,24 +849,11 @@ def _render_employee_documents(projects, token):
 
             with st.form("employee_upload_document_form", clear_on_submit=True):
                 project_names = [p["name"] for p in projects]
-                default_index = 0
-                if active_project_id is not None:
-                    matching = [
-                        p["name"] for p in projects
-                        if str(p.get("id")) == str(active_project_id)
-                    ]
-                    if matching:
-                        default_index = project_names.index(matching[0])
-
                 upload_project_label = st.selectbox(
-                    "Project",
-                    project_names,
-                    index=default_index,
-                    key="employee_upload_project_select",
+                    "Project", project_names, key="employee_upload_project_select",
                 )
                 uploaded_file = st.file_uploader(
-                    "Choose a file",
-                    type=None,
+                    "Choose a file", type=None,
                     key=f"employee_doc_uploader_{st.session_state['employee_doc_uploader_key']}",
                 )
                 if st.form_submit_button("Upload", type="primary"):
@@ -673,101 +861,94 @@ def _render_employee_documents(projects, token):
                         st.warning("Please choose a file first.")
                     else:
                         upload_project_id = next(
-                            (p["id"] for p in projects if p["name"] == upload_project_label),
-                            None,
+                            (p["id"] for p in projects if p["name"] == upload_project_label), None
                         )
-                        resp = upload_document(
-                            token, uploaded_file, project_id=str(upload_project_id)
-                        )
+                        resp = upload_document(token, uploaded_file, project_id=str(upload_project_id))
                         if resp.status_code in (200, 201):
                             st.session_state["employee_doc_uploader_key"] += 1
                             data = resp.json() if resp.content else {}
                             chunks = int(data.get("chunk_count") or 0)
                             if chunks > 0:
                                 st.success(
-                                    f"Uploaded to **{upload_project_label}** and indexed "
-                                    f"for AI Chat ({chunks} chunk(s))."
+                                    f"Uploaded to **{upload_project_label}** and "
+                                    f"indexed for AI Chat ({chunks} chunk(s))."
                                 )
                             else:
                                 st.success(
                                     f"Uploaded to **{upload_project_label}**. "
-                                    "No text for RAG yet — click Reindex if needed."
+                                    "No text extracted — use a "
+                                    "PDF/DOCX/PPTX/TXT file."
                                 )
                             st.rerun()
                         else:
                             show_api_error(resp)
 
     st.write("")
-    st.caption(
-        "Indexed documents can be selected in the sidebar **AI Chat Assistant** for RAG Q&A."
-    )
 
-    docs_resp = list_documents(token, project_id=active_project_id)
-    documents = _safe_json_list(docs_resp)
+    docs_resp = list_documents(token)
     if docs_resp.status_code != 200:
+        show_api_error(docs_resp)
         return
+    documents = _safe_json_list(docs_resp)
 
     if not documents:
         st.info("No documents to show for this selection.")
         return
 
     name_by_id = _project_name_map(projects)
+
+    # ---- All Documents — filterable by project -------------------------
     with st.container(border=True):
-        st.subheader(f"Documents — {project_label}")
-        for doc in documents:
-            row = st.columns([3, 1, 1, 1])
+        st.subheader("All Documents")
+        st.caption("Upload PDF/DOCX/PPTX/TXT to enable chat RAG. Files are indexed on upload.")
+
+        doc_filter_options = ["All Documents"] + [p.get("name", "—") for p in projects]
+        selected_doc_filter = st.selectbox(
+            "📁 Filter by project", doc_filter_options,
+            key="employee_documents_project_filter",
+        )
+
+        if selected_doc_filter == "All Documents":
+            filtered_documents = documents
+        else:
+            filter_project = next(
+                (p for p in projects if p.get("name") == selected_doc_filter), None
+            )
+            filtered_documents = [
+                d for d in documents if str(d.get("project_id")) == str(filter_project.get("id"))
+            ] if filter_project else []
+
+        if not filtered_documents:
+            st.info("No documents for this selection.")
+
+        for doc in filtered_documents:
+            row = st.columns([3, 1, 1])
             with row[0]:
                 st.markdown(f"📄 **{doc.get('filename', '—')}**")
-                st.caption(rag_status_label(doc))
                 pid = doc.get("project_id")
                 if pid:
                     st.caption(f"📁 {name_by_id.get(str(pid), 'Project')}")
+                st.caption(rag_status_label(doc))
             with row[1]:
-                # Lazy download: fetch the file only when the user asks for
-                # it, instead of downloading every document on every rerun.
-                dl_state_key = f"employee_dl_ready_{doc['id']}"
-                if st.session_state.get(dl_state_key):
-                    ready = st.session_state[dl_state_key]
+                resp = download_document(token, str(doc["id"]))
+                if resp.status_code == 200:
                     st.download_button(
-                        "Save file",
-                        data=ready["content"],
-                        file_name=ready["filename"],
+                        "Download", data=resp.content, file_name=doc["filename"],
                         mime="application/octet-stream",
-                        key=f"employee_dl_save_{doc['id']}",
-                        use_container_width=True,
+                        key=f"employee_dl_{doc['id']}", use_container_width=True,
                     )
                 else:
-                    if st.button(
-                        "Download",
-                        key=f"employee_dl_prep_{doc['id']}",
-                        use_container_width=True,
-                    ):
-                        resp = download_document(token, str(doc["id"]))
-                        if resp.status_code == 200:
-                            st.session_state[dl_state_key] = {
-                                "content": resp.content,
-                                "filename": doc.get("filename", "file"),
-                            }
-                            st.rerun()
-                        else:
-                            show_api_error(resp)
+                    show_api_error(resp)
             with row[2]:
-                if st.button(
-                    "Preview",
-                    key=f"employee_view_{doc['id']}",
-                    use_container_width=True,
-                ):
+                if st.button("Preview", key=f"employee_view_{doc['id']}", use_container_width=True):
                     show_document_preview(token, doc)
-            with row[3]:
-                trigger_reindex(token, doc, key=f"employee_reindex_{doc['id']}")
             st.divider()
-
 
 # --------------------------------------------------------------------------
 # APP ENTRY
 # --------------------------------------------------------------------------
 def render_employee_app():
-    _inject_dark_theme()
+    _inject_light_theme()
 
     token = session_token()
     if not token:
@@ -780,19 +961,24 @@ def render_employee_app():
     projects_resp = get_projects(token)
     projects = _safe_json_list(projects_resp)
 
+    if st.session_state.get(NAV_RADIO_KEY) not in NAV_PAGES:
+        st.session_state[NAV_RADIO_KEY] = NAV_PAGES[0]
+
     with st.sidebar:
         render_sidebar_header()
-        st.subheader("Employee menu")
+        st.caption("EMPLOYEE MENU")
         page = st.radio(
             "Go to",
-            ["Dashboard", "My Tasks", "My Projects", "Documents"],
+            NAV_PAGES,
+            label_visibility="collapsed",
+            key=NAV_RADIO_KEY,
         )
 
-    if page == "Dashboard":
+    if page == "🏠 Dashboard":
         _render_employee_dashboard(projects, token)
-    elif page == "My Tasks":
+    elif page == "✅ My Tasks":
         _render_employee_tasks(projects, token)
-    elif page == "My Projects":
+    elif page == "📁 My Projects":
         _render_employee_projects(projects, token)
-    elif page == "Documents":
+    elif page == "📄 Documents":
         _render_employee_documents(projects, token)

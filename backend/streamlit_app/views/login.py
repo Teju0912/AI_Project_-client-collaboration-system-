@@ -13,7 +13,7 @@ def render_login():
     st.set_page_config(
         page_title="Affordable AI — Sign In",
         page_icon="🔺",
-        layout="centered",
+        layout="centered", 
         initial_sidebar_state="collapsed",
     )
 

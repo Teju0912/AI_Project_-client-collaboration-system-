@@ -3,6 +3,10 @@ api_client.py
 Every Streamlit page calls the backend through these functions instead of
 using `requests` directly everywhere — keeps the base URL and auth header
 handling in one place.
+
+CHANGE LOG (Jira-style Tasks tab):
+  - NEW: get_task, get_subtasks, create_subtask, get_comments, add_comment,
+    get_task_links, add_task_link, remove_task_link
 """
 
 import os
@@ -88,8 +92,53 @@ def patch_task_status(token: str, task_id: str, payload: dict):
     return api_request("PATCH", f"/tasks/{task_id}/status", token=token, json_body=payload)
 
 
+def update_task(token: str, task_id: str, payload: dict):
+    return api_request("PATCH", f"/tasks/{task_id}", token=token, json_body=payload)
+
+
 def delete_task(token: str, task_id: str):
     return api_request("DELETE", f"/tasks/{task_id}", token=token)
+
+
+# ---------- Tasks: Jira-style issue detail (NEW) ----------
+def get_task(token: str, task_id: str):
+    """Full issue detail: fields + subtasks + comments + linked issues."""
+    return api_request("GET", f"/tasks/{task_id}", token=token)
+
+
+def get_subtasks(token: str, task_id: str):
+    return api_request("GET", f"/tasks/{task_id}/subtasks", token=token)
+
+
+def create_subtask(token: str, task_id: str, payload: dict):
+    return api_request("POST", f"/tasks/{task_id}/subtasks", token=token, json_body=payload)
+
+
+def get_comments(token: str, task_id: str):
+    return api_request("GET", f"/tasks/{task_id}/comments", token=token)
+
+
+def add_comment(token: str, task_id: str, body: str):
+    return api_request(
+        "POST", f"/tasks/{task_id}/comments", token=token, json_body={"body": body}
+    )
+
+
+def get_task_links(token: str, task_id: str):
+    return api_request("GET", f"/tasks/{task_id}/links", token=token)
+
+
+def add_task_link(token: str, task_id: str, linked_task_id: str, link_type: str = "relates to"):
+    return api_request(
+        "POST",
+        f"/tasks/{task_id}/links",
+        token=token,
+        json_body={"linked_task_id": linked_task_id, "link_type": link_type},
+    )
+
+
+def remove_task_link(token: str, task_id: str, link_id: str):
+    return api_request("DELETE", f"/tasks/{task_id}/links/{link_id}", token=token)
 
 
 # ---------- Documents ----------
@@ -185,26 +234,47 @@ def generate_ai_tasks(token: str, project_name: str, description: str):
     )
 
 
-# ---------- Requirement Analyzer ----------
-def analyze_requirement(token: str, document_id: str | None = None, project_id: str | None = None):
-    payload = {}
-    if document_id:
-        payload["document_id"] = document_id
-    if project_id:
-        payload["project_id"] = project_id
-    return api_request("POST", "/ai/analyze-requirement", token=token, json_body=payload)
+# ---------- AI Requirement Analyzer ----------
+def analyze_requirement(token: str, document_id: str, project_id: str):
+    """POST /ai/analyze-requirement — returns a pending_review analysis."""
+    payload = {
+        "document_id": document_id,
+        "project_id": project_id,
+    }
+    return api_request(
+        "POST",
+        "/ai/analyze-requirement",
+        token=token,
+        json_body=payload,
+    )
 
 
 def get_requirement_analysis(token: str, analysis_id: str):
-    return api_request("GET", f"/ai/requirement-analyses/{analysis_id}", token=token)
+    """GET /ai/requirement-analyses/{id} — fetch one for review."""
+    return api_request(
+        "GET",
+        f"/ai/requirement-analyses/{analysis_id}",
+        token=token,
+    )
 
 
-def approve_requirement_analysis(token: str, analysis_id: str, payload: dict):
-    return api_request("POST", f"/ai/requirement-analyses/{analysis_id}/approve", token=token, json_body=payload)
+def approve_requirement_analysis(token: str, analysis_id: str, epics: list):
+    """POST /ai/requirement-analyses/{id}/approve — create tasks from edited epics."""
+    return api_request(
+        "POST",
+        f"/ai/requirement-analyses/{analysis_id}/approve",
+        token=token,
+        json_body={"epics": epics},
+    )
 
 
 def reject_requirement_analysis(token: str, analysis_id: str):
-    return api_request("POST", f"/ai/requirement-analyses/{analysis_id}/reject", token=token)
+    """POST /ai/requirement-analyses/{id}/reject — mark rejected, no tasks."""
+    return api_request(
+        "POST",
+        f"/ai/requirement-analyses/{analysis_id}/reject",
+        token=token,
+    )
 
 
 # ---------- Weekly Reports ----------
@@ -261,7 +331,7 @@ def ask_ai_chat(
         f"{API_BASE_URL}/chat/query",
         headers=headers,
         json=body,
-        timeout=180,
+        timeout=90,
     )
 
 
