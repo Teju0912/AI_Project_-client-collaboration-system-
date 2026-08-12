@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 
 from api_client import (
     get_client_dashboard,
+    get_project_modules,
     download_document,
     upload_document,
     delete_document,
@@ -31,7 +32,8 @@ from views.shared import (
     show_document_preview,
     session_token,
     session_user,
-    rag_index_caption,
+    rag_status_label,
+    trigger_reindex,
 )
 
 SHOW_DEMO_DASHBOARD = True
@@ -94,6 +96,8 @@ def _status_meta(status_text):
 def _effective_progress(dashboard):
     """Completed projects always read 100%, regardless of a stale stored
     progress_percent value. Every other status uses the real stored value."""
+    if dashboard.get("module_progress_percent") is not None:
+        return dashboard["module_progress_percent"]
     if (dashboard.get("status") or "").strip().lower() == "completed":
         return 100
     return dashboard.get("progress_percent", 0)
@@ -454,10 +458,10 @@ def _doc_type_pie(dashboards):
 
 
 # --------------------------------------------------------------------------
-# DOCUMENT ROW (Reindex button removed — only Download / Preview / Delete)
+# DOCUMENT ROW
 # --------------------------------------------------------------------------
 def _render_doc_row(token, doc, key_prefix, can_delete=True):
-    cols = st.columns([3, 1, 1, 1] if can_delete else [3, 1, 1])
+    cols = st.columns([3, 1, 1, 1, 1] if can_delete else [3, 1, 1, 1])
     with cols[0]:
         st.markdown(
             "<span style='display:inline-flex; align-items:center; justify-content:center; "
@@ -465,7 +469,7 @@ def _render_doc_row(token, doc, key_prefix, can_delete=True):
             "margin-right:6px;'>" + _doc_icon(doc["filename"]) + "</span>" + doc["filename"],
             unsafe_allow_html=True,
         )
-        st.caption(rag_index_caption(doc))
+        st.caption(rag_status_label(doc))
     with cols[1]:
         resp = download_document(token, str(doc["id"]))
         if resp.status_code == 200:
@@ -479,8 +483,10 @@ def _render_doc_row(token, doc, key_prefix, can_delete=True):
     with cols[2]:
         if st.button("Preview", key=key_prefix + "_view_" + str(doc["id"]), width="stretch"):
             show_document_preview(token, doc)
+    with cols[3]:
+        trigger_reindex(token, doc, key=key_prefix + "_reindex_" + str(doc["id"]))
     if can_delete:
-        with cols[3]:
+        with cols[4]:
             if st.button("Delete", key=key_prefix + "_del_" + str(doc["id"]), width="stretch"):
                 delete_resp = delete_document(token, str(doc["id"]))
                 if delete_resp.status_code == 204:
@@ -488,6 +494,43 @@ def _render_doc_row(token, doc, key_prefix, can_delete=True):
                     st.rerun()
                 else:
                     show_api_error(delete_resp)
+
+
+def _render_project_modules(token, project_id, key_prefix):
+    """Display the persisted workflow steps shared by the project manager."""
+    resp = get_project_modules(token, str(project_id))
+    if resp.status_code != 200:
+        show_api_error(resp)
+        return
+    modules = resp.json()
+    with st.expander("🧩 Project modules (" + str(len(modules)) + ")"):
+        if not modules:
+            st.caption("The project workflow has not been defined yet.")
+            return
+        completed = sum(1 for module in modules if module.get("status") == "completed")
+        st.progress(completed / len(modules), text=str(completed) + "/" + str(len(modules)) + " complete")
+        for module in modules:
+            status = (module.get("status") or "locked").replace("_", " ").title()
+            st.markdown(
+                module.get("icon", "🧩") + " **" + module.get("name", "—") + "** — " + status
+            )
+            if module.get("description"):
+                st.caption(module["description"])
+
+
+def _attach_module_progress(token, dashboards):
+    """Use persisted module completion for project progress when a workflow exists."""
+    for dashboard in dashboards:
+        resp = get_project_modules(token, str(dashboard["project_id"]))
+        if resp.status_code != 200:
+            show_api_error(resp)
+            continue
+        modules = resp.json()
+        if modules:
+            completed = sum(1 for module in modules if module.get("status") == "completed")
+            dashboard["module_progress_percent"] = round(100 * completed / len(modules))
+            dashboard["module_count"] = len(modules)
+            dashboard["completed_module_count"] = completed
 
 
 # --------------------------------------------------------------------------
@@ -542,6 +585,9 @@ def _render_client_dashboard():
     else:
         active_dashboards = [d for d in dashboards if d["project_name"] == selected_project_name]
         show_remaining_list = False
+
+    if not using_demo:
+        _attach_module_progress(token, active_dashboards)
 
     st.caption("Showing data for: **" + selected_project_name + "**")
     st.write("")
@@ -630,6 +676,11 @@ def _render_client_dashboard():
                     "<div class='meta-row'>🎯 Current Milestone &nbsp; <b>" + hero["milestone_info"] + "</b></div>",
                     unsafe_allow_html=True,
                 )
+            if hero.get("module_count"):
+                st.caption(
+                    "Workflow progress: " + str(hero["completed_module_count"]) + "/"
+                    + str(hero["module_count"]) + " modules complete"
+                )
 
             pill_text, pill_cls = _deadline_pill(hero_days)
             st.markdown(_pill_html(pill_text, pill_cls), unsafe_allow_html=True)
@@ -641,6 +692,9 @@ def _render_client_dashboard():
             elif not using_demo:
                 for doc in hero_docs:
                     _render_doc_row(token, doc, key_prefix="hero_" + str(hero["project_id"]), can_delete=False)
+
+        if not using_demo:
+            _render_project_modules(token, hero["project_id"], "hero_" + str(hero["project_id"]))
 
     st.write("")
 
@@ -683,6 +737,11 @@ def _render_client_dashboard():
 
                 if dashboard.get("milestone_info"):
                     st.caption(dashboard["milestone_info"])
+                if dashboard.get("module_count"):
+                    st.caption(
+                        "Workflow: " + str(dashboard["completed_module_count"]) + "/"
+                        + str(dashboard["module_count"]) + " modules complete"
+                    )
 
                 documents = dashboard.get("documents") or []
                 with st.expander("📄 Documents (" + str(len(documents)) + ")"):
@@ -695,6 +754,9 @@ def _render_client_dashboard():
                                 key_prefix="dash_" + str(dashboard["project_id"]),
                                 can_delete=False,
                             )
+                _render_project_modules(
+                    token, dashboard["project_id"], "dash_" + str(dashboard["project_id"])
+                )
             st.write("")
 
     _section_heading("📊", "Analytics")
@@ -741,7 +803,6 @@ def _render_client_documents():
 
     project_options = {d["project_name"]: d["project_id"] for d in dashboards}
 
-    # ---- Upload ---------------------------------------------------------
     with st.container(border=True):
         st.subheader("⬆️ Upload a document")
         if not project_options:
@@ -775,46 +836,25 @@ def _render_client_documents():
         st.info("No projects found for your account yet.")
         return
 
-    # ---- Flatten all documents across projects ---------------------------
-    all_documents = []
-    for d in dashboards:
-        for doc in d.get("documents", []):
-            doc = dict(doc)
-            doc["_project_id"] = d["project_id"]
-            doc["_project_name"] = d["project_name"]
-            all_documents.append(doc)
-
-    if not all_documents:
+    any_documents = any(d.get("documents") for d in dashboards)
+    if not any_documents:
         st.info("No documents on your projects yet. Upload one above, or wait for your team to share files.")
         return
 
-    # ---- All Documents — filterable by project ---------------------------
-    with st.container(border=True):
-        st.subheader("All Documents")
+    tab_labels = [d["project_name"] for d in dashboards if d.get("documents")]
+    tabs = st.tabs(tab_labels) if tab_labels else []
 
-        doc_filter_options = ["All Documents"] + [d["project_name"] for d in dashboards if d.get("documents")]
-        selected_doc_filter = st.selectbox(
-            "📁 Filter by project", doc_filter_options,
-            key="client_documents_project_filter",
-        )
+    for tab, dashboard in zip(tabs, [d for d in dashboards if d.get("documents")]):
+        with tab:
+            documents = dashboard["documents"]
+            st.caption(str(len(documents)) + " file(s) on this project")
+            for doc in documents:
+                _render_doc_row(
+                    token, doc,
+                    key_prefix="docs_" + str(dashboard["project_id"]),
+                    can_delete=True,
+                )
 
-        if selected_doc_filter == "All Documents":
-            filtered_documents = all_documents
-        else:
-            filtered_documents = [
-                doc for doc in all_documents if doc["_project_name"] == selected_doc_filter
-            ]
-
-        if not filtered_documents:
-            st.info("No documents for this selection.")
-
-        for doc in filtered_documents:
-            st.caption(f"📁 {doc['_project_name']}")
-            _render_doc_row(
-                token, doc,
-                key_prefix="docs_" + str(doc["_project_id"]),
-                can_delete=True,
-            )
 
 # --------------------------------------------------------------------------
 # APP ENTRY

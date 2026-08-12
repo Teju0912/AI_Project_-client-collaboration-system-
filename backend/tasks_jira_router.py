@@ -161,10 +161,12 @@ def _serialize_detail(db: Session, task: Task) -> dict:
     return {
         "id": str(task.id),
         "project_id": str(task.project_id) if task.project_id else None,
+        "module_id": str(task.module_id) if task.module_id else None,
         "title": task.title,
         "description": task.description,
         "epic": task.epic,
         "status": task.status,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "priority": task.priority or "medium",
         "story_points": float(task.story_points) if task.story_points is not None else None,
         "labels": task.labels or [],

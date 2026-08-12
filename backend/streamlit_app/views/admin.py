@@ -1,6 +1,16 @@
 """
-admin.py
+admin_merged.py
 
+Merged version: combines teju_admin.py + admin.py so no function is lost.
+
+- Hover-highlighted stat cards (_inject_stat_card_hover_css) applied on
+  EVERY page: Dashboard, Users & Roles, Clients, Projects — this behavior
+  was only in teju_admin.py; admin.py only had it on the Dashboard.
+- "Overall System Overview" card uses PROJECT MODULES data
+  (get_project_modules) — this was only in admin.py; teju_admin.py used
+  task-status counts instead. Kept the modules version since it's the
+  richer/more complete feature.
+- Extra stStatusWidget theming CSS from admin.py included.
 """
 
 import datetime as dt
@@ -11,6 +21,7 @@ import plotly.graph_objects as go
 from api_client import (
     get_clients, get_projects, get_tasks, list_documents, get_users,
     get_team, create_project, update_project, assign_team,
+    get_project_modules,
     create_client, update_client, delete_client,
     patch_task_status, create_task, update_task, delete_task,
     upload_document, download_document, delete_document,
@@ -87,6 +98,8 @@ def _inject_light_theme():
         "[data-testid='stDecoration'] { background-image: none !important; background-color: #F8F9FF !important; }",
         "[data-testid='stAppViewContainer'] { background-color: #F8F9FF !important; }",
         "[data-testid='stMain'] { background-color: transparent !important; }",
+        "[data-testid='stStatusWidget'] { background-color: #FFFFFF !important; }",
+        "[data-testid='stStatusWidget'] * { color: #111827 !important; }",
         ".block-container { padding-top: 1.5rem; padding-bottom: 3rem; }",
         "",
         "h1, h2, h3, h4, h5, h6, p, span, label, li, div, .stMarkdown { color: #111827 !important; }",
@@ -311,7 +324,8 @@ def _inject_stat_card_hover_css():
     rest, plus a strong highlight + lift-on-hover. Targets containers via
     their `st-key-stat-card-*` class (set by passing key= to st.container),
     which is reliable regardless of DOM nesting — unlike sibling-selector
-    tricks.
+    tricks. Applied on every page that renders stat cards (Dashboard,
+    Users & Roles, Clients, Projects).
     """
     st.markdown(
         """
@@ -643,11 +657,12 @@ def _render_admin_dashboard():
 
     st.divider()
 
-    # ---- Overall System Overview — shifted down, project dropdown added,
-    # ---- ring graph moved to the right side ----------------------------
+    # ---- Overall System Overview — module completion across projects.
+    # Pick a project to filter, or view all. Uses get_project_modules()
+    # (real module-level data) rather than task-status counts.
     with st.container(border=True):
         st.subheader("Overall System Overview")
-        st.caption("Summary of tasks — pick a project to filter, or view all.")
+        st.caption("Module completion across projects — pick a project to filter, or view all.")
 
         project_choice_labels = ["All Projects"] + [p.get("name", "—") for p in projects]
         selected_project_label = st.selectbox(
@@ -655,33 +670,59 @@ def _render_admin_dashboard():
             key="admin_overview_project_filter",
         )
 
-        if selected_project_label == "All Projects":
-            filtered_tasks = tasks
-        else:
-            selected_proj = next((p for p in projects if p.get("name") == selected_project_label), None)
-            filtered_tasks = [
-                t for t in tasks if str(t.get("project_id")) == str(selected_proj.get("id"))
-            ] if selected_proj else []
+        selected_projects = projects
+        if selected_project_label != "All Projects":
+            selected_projects = [
+                p for p in projects if p.get("name") == selected_project_label
+            ]
 
-        if not filtered_tasks:
-            st.info("No tasks yet for this selection.")
-        else:
-            status_counts = {k: 0 for k in STATUS_META}
-            for t in filtered_tasks:
-                sk = t.get("status") or "todo"
-                status_counts[sk if sk in status_counts else "todo"] += 1
-            done_pct = round(100 * status_counts["done"] / len(filtered_tasks))
+        module_items = []
+        for project in selected_projects:
+            resp = get_project_modules(token, str(project["id"]))
+            if resp.status_code != 200:
+                show_api_error(resp)
+                continue
+            for module in resp.json():
+                module_items.append({**module, "project_name": project.get("name", "—")})
 
-            phase_col, ring_col = st.columns([1.5, 1.1])
-            with phase_col:
+        if not module_items:
+            st.info("No project modules yet for this selection.")
+        else:
+            completed_modules = [m for m in module_items if m.get("status") == "completed"]
+            todo_modules = [m for m in module_items if m.get("status") != "completed"]
+            complete_pct = round(100 * len(completed_modules) / len(module_items))
+
+            list_col, ring_col = st.columns([2, 1])
+            with list_col:
+                st.markdown(f"**Completed · {len(completed_modules)}**")
+                if completed_modules:
+                    for module in completed_modules:
+                        st.markdown(
+                            "<span style='color:#6D28D9;'>●</span> "
+                            f"{module.get('project_name')} · {module.get('name', '—')}",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("No completed modules.")
+
                 st.write("")
-                _phase_rows(status_counts, len(filtered_tasks))
+                st.markdown(f"**To Do · {len(todo_modules)}**")
+                if todo_modules:
+                    for module in todo_modules:
+                        st.markdown(
+                            "<span style='color:#9CA3AF;'>●</span> "
+                            f"{module.get('project_name')} · {module.get('name', '—')}",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("No modules left to complete.")
             with ring_col:
                 st.plotly_chart(
-                    _progress_ring(done_pct, "#4F46E5"),
+                    _progress_ring(complete_pct, "#6D28D9"),
                     use_container_width=True, config={"displayModeBar": False},
-                    key="admin_overall_ring",
+                    key="admin_overall_module_ring",
                 )
+                st.caption(f"{len(completed_modules)} of {len(module_items)} modules complete")
 
     st.divider()
 

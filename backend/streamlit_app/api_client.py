@@ -216,6 +216,36 @@ def get_team(token, project_id):
     return api_request("GET", f"/projects/{project_id}/team", token=token)
 
 
+# ---------- Project modules ----------
+def get_project_modules(token: str, project_id: str):
+    return api_request("GET", f"/projects/{project_id}/modules", token=token)
+
+
+def create_project_module(token: str, project_id: str, payload: dict):
+    return api_request("POST", f"/projects/{project_id}/modules", token=token, json_body=payload)
+
+
+def insert_project_module(token: str, project_id: str, position: int, payload: dict):
+    return api_request(
+        "POST", f"/projects/{project_id}/modules/insert-at/{position}", token=token, json_body=payload
+    )
+
+
+def update_project_module(token: str, module_id: str, payload: dict):
+    return api_request("PATCH", f"/modules/{module_id}", token=token, json_body=payload)
+
+
+def delete_project_module(token: str, module_id: str):
+    return api_request("DELETE", f"/modules/{module_id}", token=token)
+
+
+def reorder_project_modules(token: str, project_id: str, ordered_ids: list[str]):
+    return api_request(
+        "POST", f"/projects/{project_id}/modules/reorder", token=token,
+        json_body={"ordered_ids": ordered_ids},
+    )
+
+
 def get_client_dashboard(token):
     return api_request("GET", "/client-dashboard", token=token)
 

@@ -1,5 +1,29 @@
 """
-manager.py
+manager_merged.py
+
+Merged version of manager.py + teju_manager.py.
+
+After a full line-by-line comparison, manager.py was found to be a strict
+superset of teju_manager.py: every function, page, and helper in
+teju_manager.py exists in manager.py with the same or an improved
+implementation. manager.py additionally includes:
+
+  1. The full "Project Modules" workflow feature (imports:
+     get_project_modules, create_project_module, insert_project_module,
+     update_project_module, delete_project_module,
+     reorder_project_modules; constants MODULE_STATUS_META /
+     MODULE_ICON_OPTIONS; functions _get_project_modules,
+     _resequence_module_locks, _inject_module_flow_css,
+     _render_module_flow_card, _module_detail_dialog,
+     _manage_modules_dialog, _render_project_modules_section) — entirely
+     absent from teju_manager.py.
+  2. A bug fix in the Tasks page dialog handling: opening/creating an
+     issue now properly clears the other dialog's session-state flag
+     (elif instead of two independent ifs), and switching sidebar pages
+     clears module/task dialog state too — teju_manager.py did not have
+     this fix.
+
+No function from either file was removed.
 """
 
 import datetime as dt
@@ -11,6 +35,8 @@ import plotly.graph_objects as go
 from api_client import (
     get_projects, get_tasks, list_documents, get_clients, get_users,
     get_team, create_project, update_project, assign_team,
+    get_project_modules, create_project_module, insert_project_module,
+    update_project_module, delete_project_module, reorder_project_modules,
     create_client, update_client, delete_client,
     patch_task_status, update_task, delete_task, download_document, create_task,
     upload_document, delete_document,
@@ -56,6 +82,12 @@ PROJECT_STATUS_META = {
     "on_hold":   {"icon": "⏸️", "hex": "#EAB308"},
     "completed": {"icon": "✅", "hex": "#3B82F6"},
 }
+MODULE_STATUS_META = {
+    "completed":   {"label": "Completed",   "icon": "✅", "color": "#22C55E"},
+    "in_progress": {"label": "In Progress", "icon": "🔵", "color": "#4F46E5"},
+    "locked":      {"label": "Locked",      "icon": "🔒", "color": "#9CA3AF"},
+}
+MODULE_ICON_OPTIONS = ["🧩", "👤", "👥", "💳", "🔔", "⚙️", "🔐", "📦", "🔗", "📊", "🧪", "📁"]
 
 ALL_PROJECTS_LABEL = "All Projects"
 ACTIVE_PROJECT_KEY = "manager_active_project_id"
@@ -1366,6 +1398,7 @@ def _issue_card(t, project_by_id):
             st.markdown(_labels_html(t["labels"]), unsafe_allow_html=True)
  
         if st.button("Open", key=f"mgr_open_issue_{t['id']}", use_container_width=True):
+            st.session_state["mgr_show_create_issue"] = False
             st.session_state["mgr_open_issue_id"] = t["id"]
             st.rerun()
  
@@ -1417,6 +1450,7 @@ def _render_manager_tasks(projects, token):
         )
     with toolbar_create:
         if st.button("➕ Create issue", type="primary", use_container_width=True, key="mgr_create_issue_btn"):
+            st.session_state["mgr_open_issue_id"] = None
             st.session_state["mgr_show_create_issue"] = True
  
     filtered = tasks
@@ -1453,9 +1487,8 @@ def _render_manager_tasks(projects, token):
     if st.session_state.get("mgr_show_create_issue"):
         _create_issue_dialog(token, projects, active_project_id)
  
-    open_issue_id = st.session_state.get("mgr_open_issue_id")
-    if open_issue_id:
-        _issue_detail_dialog(token, projects, open_issue_id)
+    elif st.session_state.get("mgr_open_issue_id"):
+        _issue_detail_dialog(token, projects, st.session_state["mgr_open_issue_id"])
 
 
 # --------------------------------------------------------------------------
@@ -1601,6 +1634,398 @@ def _project_task_progress(project_id, tasks):
         return None, 0, 0
     done = sum(1 for t in linked if (t.get("status") or "") == "done")
     return round(100 * done / len(linked)), done, len(linked)
+
+
+def _get_project_modules(token, project_id):
+    """Load persisted modules from the backend, ordered by workflow position."""
+    resp = get_project_modules(token, str(project_id))
+    if resp.status_code == 200:
+        return resp.json()
+    show_api_error(resp)
+    return []
+
+
+def _resequence_module_locks(token, modules):
+    """Keep exactly the first unfinished module active and persist status changes."""
+    unlocked = False
+    for m in modules:
+        desired_status = "completed"
+        if m["status"] == "completed":
+            continue
+        if not unlocked:
+            desired_status = "in_progress"
+            unlocked = True
+        else:
+            desired_status = "locked"
+        if m["status"] != desired_status:
+            resp = update_project_module(token, str(m["id"]), {"status": desired_status})
+            if resp.status_code != 200:
+                show_api_error(resp)
+                return False
+    return True
+
+
+def _inject_module_flow_css():
+    st.markdown(
+        """
+        <style>
+        .module-anchor { display: none; }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.module-anchor-completed) {
+            border-left: 4px solid #22C55E !important;
+        }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.module-anchor-in_progress) {
+            border: 1.5px solid #4F46E5 !important;
+            box-shadow: 0 0 0 3px rgba(79,70,229,0.12) !important;
+        }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.module-anchor-locked) {
+            opacity: 0.7;
+        }
+        .module-arrow {
+            display:flex; align-items:center; justify-content:center;
+            height:100%; font-size:1.4rem; color:#9CA3AF; font-weight:700;
+            padding-top: 46px;
+        }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.module-anchor) {
+            transition: box-shadow 0.15s ease, transform 0.15s ease;
+        }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.module-anchor):hover {
+            border-color: #4F46E5 !important;
+            box-shadow: 0 6px 16px rgba(79,70,229,0.18) !important;
+            transform: translateY(-2px);
+        }
+
+        /* Horizontal-scroll wrapper for the module flow row so cards
+           keep a fixed size instead of shrinking when many modules
+           are added. */
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"] {
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            padding-bottom: 12px !important;
+            gap: 0 !important;
+        }
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"] > div[data-testid="column"],
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+            flex: 0 0 auto !important;
+            width: 210px !important;
+            min-width: 210px !important;
+        }
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"] > div[data-testid="column"]:has(.module-arrow),
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:has(.module-arrow) {
+            width: 40px !important;
+            min-width: 40px !important;
+        }
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"]::-webkit-scrollbar {
+            height: 8px;
+        }
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"]::-webkit-scrollbar-thumb {
+            background: #C7D2FE;
+            border-radius: 999px;
+        }
+        .st-key-mgr_modules_flow_scroll [data-testid="stHorizontalBlock"]::-webkit-scrollbar-track {
+            background: #F3F4F6;
+            border-radius: 999px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    
+def _render_module_flow_card(token, project_id, module):
+    meta = MODULE_STATUS_META[module["status"]]
+    with st.container(border=True):
+        st.markdown(
+            f"<span class='module-anchor module-anchor-{module['status']}'></span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;'>"
+            f"<span style='font-size:1.4rem;line-height:1;'>{module.get('icon', '🧩')}</span>"
+            f"<span style='font-weight:700;font-size:1rem;color:#111827;'>{module['name']}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.write("")
+
+        if st.button("👁️ Open", key=f"mod_open_{project_id}_{module['id']}",
+                     use_container_width=True):
+            st.session_state["mgr_module_detail_open"] = (project_id, module["id"])
+            st.rerun()
+
+        if st.button(
+            "✅ Complete", key=f"mod_complete_{project_id}_{module['id']}",
+            use_container_width=True, type="primary",
+            disabled=module["status"] != "in_progress",
+        ):
+            resp = update_project_module(token, str(module["id"]), {"status": "completed"})
+            if resp.status_code == 200:
+                modules = _get_project_modules(token, project_id)
+                if _resequence_module_locks(token, modules):
+                    st.rerun()
+            else:
+                show_api_error(resp)
+
+def _module_detail_dialog(token, project_id, module):
+    @st.dialog("Module details", width="large")
+    def _dialog():
+        meta = MODULE_STATUS_META[module["status"]]
+        st.markdown(f"### {module.get('icon', '🧩')} {module['name']}")
+        _hex_pill(f"{meta['icon']} {meta['label']}", meta["color"])
+        st.write("")
+        st.markdown("**Description**")
+        st.write(module.get("description") or "No description added yet.")
+
+        st.write("")
+        if module["status"] == "in_progress":
+            if st.button(
+                "✅ Mark Complete", key=f"mod_dialog_complete_{project_id}_{module['id']}",
+                type="primary", use_container_width=True,
+            ):
+                resp = update_project_module(token, str(module["id"]), {"status": "completed"})
+                if resp.status_code == 200:
+                    modules = _get_project_modules(token, project_id)
+                    if _resequence_module_locks(token, modules):
+                        st.session_state["mgr_module_detail_open"] = None
+                        st.rerun()
+                else:
+                    show_api_error(resp)
+
+        if st.button("Close", key=f"mod_dialog_close_{project_id}_{module['id']}"):
+            st.session_state["mgr_module_detail_open"] = None
+            st.rerun()
+
+    _dialog()
+
+
+def _manage_modules_dialog(token, project_id):
+    @st.dialog("Manage Project Modules", width="large")
+    def _dialog():
+        modules = _get_project_modules(token, project_id)
+
+        st.markdown("**Current modules**")
+        if not modules:
+            st.caption("No modules yet — add the first one below.")
+        else:
+            for i, module in enumerate(modules):
+                row = st.columns([0.6, 3, 1.6, 0.6, 0.6, 0.6])
+                with row[0]:
+                    st.write(module.get("icon", "🧩"))
+                with row[1]:
+                    new_label = st.text_input(
+                        "Name", value=module["name"],
+                        key=f"mgr_mod_dlg_name_{project_id}_{module['id']}",
+                        label_visibility="collapsed",
+                    )
+                    if new_label.strip() and new_label.strip() != module["name"]:
+                        resp = update_project_module(
+                            token, str(module["id"]), {"name": new_label.strip()}
+                        )
+                        if resp.status_code != 200:
+                            show_api_error(resp)
+                with row[2]:
+                    meta = MODULE_STATUS_META[module["status"]]
+                    st.caption(f"{meta['icon']} {meta['label']}")
+                with row[3]:
+                    if i > 0 and st.button("↑", key=f"mgr_mod_dlg_up_{project_id}_{module['id']}",
+                                            use_container_width=True):
+                        ordered_ids = [str(m["id"]) for m in modules]
+                        ordered_ids[i - 1], ordered_ids[i] = ordered_ids[i], ordered_ids[i - 1]
+                        resp = reorder_project_modules(token, project_id, ordered_ids)
+                        if resp.status_code == 200:
+                            st.rerun()
+                        else:
+                            show_api_error(resp)
+                with row[4]:
+                    if i < len(modules) - 1 and st.button("↓", key=f"mgr_mod_dlg_down_{project_id}_{module['id']}",
+                                                           use_container_width=True):
+                        ordered_ids = [str(m["id"]) for m in modules]
+                        ordered_ids[i + 1], ordered_ids[i] = ordered_ids[i], ordered_ids[i + 1]
+                        resp = reorder_project_modules(token, project_id, ordered_ids)
+                        if resp.status_code == 200:
+                            st.rerun()
+                        else:
+                            show_api_error(resp)
+                with row[5]:
+                    if st.button("🗑️", key=f"mgr_mod_dlg_del_{project_id}_{module['id']}",
+                                 use_container_width=True):
+                        resp = delete_project_module(token, str(module["id"]))
+                        if resp.status_code == 204:
+                            remaining = [m for m in modules if m["id"] != module["id"]]
+                            if _resequence_module_locks(token, remaining):
+                                st.rerun()
+                        else:
+                            show_api_error(resp)
+
+                with st.expander("📝 Description", expanded=False):
+                    new_desc = st.text_area(
+                        "Description", value=module.get("description", ""),
+                        key=f"mgr_mod_dlg_desc_{project_id}_{module['id']}",
+                        label_visibility="collapsed", height=60,
+                        placeholder="Module description (optional)",
+                    )
+                    cleaned_desc = (new_desc or "").strip()
+                    if cleaned_desc != (module.get("description") or ""):
+                        resp = update_project_module(
+                            token, str(module["id"]), {"description": cleaned_desc or None}
+                        )
+                        if resp.status_code != 200:
+                            show_api_error(resp)
+
+        st.divider()
+
+        st.markdown("**➕ Add a module**")
+        with st.form(f"mgr_mod_dlg_add_form_{project_id}", clear_on_submit=True):
+            add_col1, add_col2 = st.columns([3, 1.4])
+            with add_col1:
+                add_name = st.text_input("Module name", placeholder="e.g. Authentication",
+                                          label_visibility="collapsed")
+            with add_col2:
+                add_icon = st.selectbox("Icon", MODULE_ICON_OPTIONS,
+                                         key=f"mgr_mod_dlg_add_icon_{project_id}",
+                                         label_visibility="collapsed")
+            add_description = st.text_area(
+                "Description", placeholder="What does this module cover? (optional)",
+                key=f"mgr_mod_dlg_add_desc_{project_id}", height=80,
+            )
+            if st.form_submit_button("Add to end of flow", use_container_width=True):
+                if not add_name.strip():
+                    st.error("Module name is required.")
+                else:
+                    resp = create_project_module(token, project_id, {
+                        "name": add_name.strip(), "icon": add_icon, "status": "locked",
+                        "description": add_description.strip() or None,
+                    })
+                    if resp.status_code == 201:
+                        modules.append(resp.json())
+                        if _resequence_module_locks(token, modules):
+                            st.rerun()
+                    else:
+                        show_api_error(resp)
+
+        if len(modules) >= 2:
+            st.markdown("**🔀 Insert a module between two existing modules**")
+            with st.form(f"mgr_mod_dlg_insert_form_{project_id}", clear_on_submit=True):
+                position_labels = [
+                    f"Between \"{modules[i]['name']}\" and \"{modules[i+1]['name']}\""
+                    for i in range(len(modules) - 1)
+                ]
+                insert_position = st.selectbox("Insert position", position_labels,
+                                                label_visibility="collapsed")
+                ins_col1, ins_col2 = st.columns([3, 1.4])
+                with ins_col1:
+                    insert_name = st.text_input(
+                        "New module name", key=f"mgr_mod_dlg_insert_name_{project_id}",
+                        label_visibility="collapsed",
+                    )
+                with ins_col2:
+                    insert_icon = st.selectbox(
+                        "Icon", MODULE_ICON_OPTIONS,
+                        key=f"mgr_mod_dlg_insert_icon_{project_id}",
+                        label_visibility="collapsed",
+                    )
+                insert_description = st.text_area(
+                    "Description", placeholder="What does this module cover? (optional)",
+                    key=f"mgr_mod_dlg_insert_desc_{project_id}", height=80,
+                )
+                if st.form_submit_button("Insert between", use_container_width=True):
+                    if not insert_name.strip():
+                        st.error("Module name is required.")
+                    else:
+                        insert_at = position_labels.index(insert_position) + 1
+                        resp = insert_project_module(token, project_id, insert_at, {
+                            "name": insert_name.strip(), "icon": insert_icon, "status": "locked",
+                            "description": insert_description.strip() or None,
+                        })
+                        if resp.status_code == 201:
+                            modules.insert(insert_at, resp.json())
+                            if _resequence_module_locks(token, modules):
+                                st.rerun()
+                        else:
+                            show_api_error(resp)
+
+        st.write("")
+        if st.button("✅ Done", key=f"mgr_mod_dlg_done_{project_id}",
+                     type="primary", use_container_width=True):
+            st.session_state["mgr_modules_dialog_project"] = None
+            st.rerun()
+
+    _dialog()
+
+def _render_project_modules_section(projects, token):
+    st.subheader("🧩 Project Modules")
+    st.caption("Break a project into a step-by-step workflow that your team completes in order.")
+
+    if not projects:
+        st.info("Create a project first to define its module workflow.")
+        return
+
+    _inject_module_flow_css()
+
+    project_names = [p["name"] for p in projects]
+    selected_name = st.selectbox("📁 Project", project_names, key="mgr_modules_project_select")
+    project = next((p for p in projects if p["name"] == selected_name), None)
+    if project is None:
+        return
+    project_id = str(project["id"])
+
+    if st.button("➕ Create Module", key=f"mgr_open_modules_dialog_{project_id}", type="primary"):
+        st.session_state["mgr_modules_dialog_project"] = project_id
+        st.rerun()
+
+    if st.session_state.get("mgr_modules_dialog_project") == project_id:
+        _manage_modules_dialog(token, project_id)
+
+    modules = _get_project_modules(token, project_id)
+    st.write("")
+
+    if not modules:
+        st.info("No modules yet for this project — click **Create Module** to build the workflow.")
+        return
+
+    n = len(modules)
+    col_spec = []
+    for i in range(n):
+        col_spec.append(3)
+        if i < n - 1:
+            col_spec.append(0.5)
+
+    with st.container(key="mgr_modules_flow_scroll"):
+        cols = st.columns(col_spec)
+
+        col_i = 0
+        for i, module in enumerate(modules):
+            with cols[col_i]:
+                _render_module_flow_card(token, project_id, module)
+            col_i += 1
+            if i < n - 1:
+                with cols[col_i]:
+                    st.markdown("<div class='module-arrow'>→</div>", unsafe_allow_html=True)
+                col_i += 1
+
+    open_target = st.session_state.get("mgr_module_detail_open")
+    if open_target and open_target[0] == project_id:
+        target_module = next((m for m in modules if m["id"] == open_target[1]), None)
+        if target_module:
+            _module_detail_dialog(token, project_id, target_module)
+        else:
+            st.session_state["mgr_module_detail_open"] = None
+
+    st.write("")
+    completed_n = sum(1 for m in modules if m["status"] == "completed")
+    pct = round(100 * completed_n / len(modules))
+    ring_col, bar_col = st.columns([1, 3])
+    with ring_col:
+        st.plotly_chart(
+            _ring(pct, "#4F46E5", height=150),
+            use_container_width=True, config={"displayModeBar": False},
+            key=f"modules_ring_{project_id}",
+        )
+    with bar_col:
+        st.write("")
+        st.markdown(f"**{completed_n} of {len(modules)} modules complete**")
+        st.progress(pct / 100, text=f"{pct}%")
+
 
 
 # --------------------------------------------------------------------------
@@ -1879,6 +2304,9 @@ def _render_manager_projects(projects, token):
                         st.rerun()
                     else:
                         show_api_error(resp)
+
+    st.write("")
+    _render_project_modules_section(projects, token)
 
     st.write("")
     assign_team_expanded = st.session_state.pop("mgr_expand_assign_team", False)
@@ -2422,6 +2850,15 @@ def render_manager_app():
             label_visibility="collapsed",
             key=NAV_RADIO_KEY,
         )
+
+    # Clear task-dialog flags on navigation so a dialog closed with X/Esc
+    # cannot reopen automatically after returning to the Tasks page.
+    if st.session_state.get("mgr_last_page") != page:
+        st.session_state["mgr_last_page"] = page
+        st.session_state["mgr_open_issue_id"] = None
+        st.session_state["mgr_show_create_issue"] = False
+        st.session_state["mgr_modules_dialog_project"] = None
+        st.session_state["mgr_module_detail_open"] = None
 
     if page == "🏠 Dashboard":
         _render_manager_dashboard(projects, token)

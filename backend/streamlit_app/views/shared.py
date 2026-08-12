@@ -39,9 +39,22 @@ def render_sidebar_header():
     user = st.session_state["user"]
     st.write(f"**{user['name']}**")
     st.write(f"Role: `{user['role']}`")
-    if st.button("Log out"):
-        st.session_state.clear()
-        st.rerun()
+ 
+
+def render_sidebar_logout():
+    """Keep the existing logout action pinned to the bottom of every sidebar."""
+    st.markdown(
+        """<style>
+        [data-testid='stSidebarUserContent'] .st-key-sidebar_logout {
+            position: fixed; bottom: 1rem; left: 1rem; width: auto;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    with st.container(key="sidebar_logout"):
+        if st.button("Log out", key="sidebar_logout_button"):
+            st.session_state.clear()
+            st.rerun()
 
 
 def session_token():
@@ -53,43 +66,6 @@ def session_user():
 
 
 _RAG_SUPPORTED_EXTS = (".pdf", ".docx", ".pptx", ".txt", ".csv", ".md", ".log")
-
-
-
-#------------Avi add ------------------------------
-
-
-def rag_index_caption(doc: dict) -> str:
-    """Human-readable RAG indexing status for a document row."""
-    chunks = int(doc.get("chunk_count") or 0)
-    if chunks > 0:
-        return f"RAG indexed · {chunks} chunk{'s' if chunks != 1 else ''}"
-    return "Not indexed for chat — use Reindex (PDF/DOCX/PPTX/TXT)"
-
-
-def render_reindex_button(token: str, doc: dict, *, key: str) -> None:
-    """Button that re-runs RAG extraction + embedding for one document."""
-    if not st.button("Reindex", key=key, use_container_width=True):
-        return
-    with st.spinner(f"Indexing {doc.get('filename', 'document')}…"):
-        resp = reindex_document(token, str(doc["id"]))
-    if resp.status_code == 200:
-        data = resp.json()
-        chunks = data.get("chunks_indexed", 0)
-        if chunks:
-            st.success(f"Indexed {chunks} chunk(s). Available in AI Chat.")
-        else:
-            st.warning(
-                "No text extracted. Use PDF, DOCX, PPTX, TXT, CSV, or MD."
-            )
-        st.rerun()
-    else:
-        show_api_error(resp)
-
-
-
-
-
 
 
 def rag_status_label(doc: dict) -> str:
@@ -593,6 +569,32 @@ def render_documents_page(*, can_delete: bool):
 
 @st.dialog("Document Preview", width="large")
 def show_document_preview(token, doc):
+    # This dialog is shared by Admin, Manager, and Employee. Keeping its
+    # styling here prevents the preview from inheriting a role page's theme.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stDialog"], [data-testid="stDialog"] > div {
+            background: #FFFFFF !important;
+        }
+        [data-testid="stDialog"] * { color: #111827 !important; }
+        [data-testid="stDialog"] [data-testid="stText"] pre,
+        [data-testid="stDialog"] [data-testid="stCodeBlock"],
+        [data-testid="stDialog"] [data-testid="stCodeBlock"] pre {
+            background: #FFFFFF !important;
+            color: #111827 !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 8px !important;
+        }
+        [data-testid="stDialog"] iframe,
+        [data-testid="stDialog"] [data-testid="stImage"] {
+            background: #FFFFFF !important;
+            border-radius: 8px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     view_resp = download_document(token, str(doc["id"]))
     if view_resp.status_code != 200:
         show_api_error(view_resp)
@@ -615,7 +617,14 @@ def show_document_preview(token, doc):
         import io
         result = mammoth.convert_to_html(io.BytesIO(view_resp.content))
         styled_html = f"""
-        <div style="background-color: white; color: black; padding: 20px; font-family: Arial, sans-serif; line-height: 1.6;">
+        <div style="background-color: #FFFFFF; color: #111827; padding: 20px; font-family: Arial, sans-serif; line-height: 1.6;">
+            <style>
+                html, body {{ background: #FFFFFF; color: #111827; }}
+                * {{ color: #111827 !important; }}
+                table {{ border-collapse: collapse; width: 100%; }}
+                th, td {{ border: 1px solid #E5E7EB; padding: 8px; text-align: left; }}
+                th {{ background: #F3F4F6; }}
+            </style>
             {result.value}
         </div>
         """

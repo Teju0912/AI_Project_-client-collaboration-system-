@@ -93,16 +93,20 @@ class ClientOut(BaseModel):
 # ---------- Tasks ----------
 class TaskCreate(BaseModel):
     project_id: Optional[uuid.UUID] = None
+    module_id: Optional[uuid.UUID] = None
     title: str
     description: Optional[str] = None
+    epic: Optional[str] = None
     status: Literal["todo", "in_progress", "testing", "done"] = "todo"
     assigned_to: Optional[uuid.UUID] = None
 
 
 class TaskUpdate(BaseModel):
     project_id: Optional[uuid.UUID] = None
+    module_id: Optional[uuid.UUID] = None
     title: Optional[str] = None
     description: Optional[str] = None
+    epic: Optional[str] = None
     status: Optional[Literal["todo", "in_progress", "testing", "done"]] = None
     assigned_to: Optional[uuid.UUID] = None
 
@@ -115,9 +119,12 @@ class TaskOut(BaseModel):
     id: uuid.UUID
     organization_id: uuid.UUID
     project_id: Optional[uuid.UUID] = None
+    module_id: Optional[uuid.UUID] = None
     title: str
     description: Optional[str] = None
+    epic: Optional[str] = None
     status: str
+    completed_at: Optional[datetime] = None
     assigned_to: Optional[uuid.UUID] = None
     created_by: uuid.UUID
     created_at: datetime
@@ -134,6 +141,7 @@ class DocumentOut(BaseModel):
     filename: str
     uploaded_by: uuid.UUID
     uploaded_at: datetime
+    # How many RAG chunks exist for this file (0 = not indexed / unsupported).
     chunk_count: int = 0
 
     class Config:
@@ -199,6 +207,45 @@ class AITaskOut(BaseModel):
     priority: str
 
 
+# ---------- AI Requirement Analyzer ----------
+class StoryOut(BaseModel):
+    title: str
+    description: str
+    priority: Literal["low", "medium", "high"] = "medium"
+
+
+class EpicOut(BaseModel):
+    title: str
+    stories: list[StoryOut] = []
+
+
+class RequirementAnalysisOut(BaseModel):
+    epics: list[EpicOut] = []
+
+
+class RequirementAnalyzeRequest(BaseModel):
+    document_id: uuid.UUID
+    project_id: uuid.UUID
+
+
+class RequirementAnalysisResult(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    document_id: Optional[uuid.UUID] = None
+    status: str
+    breakdown: RequirementAnalysisOut
+    created_at: datetime
+
+
+class RequirementReviewApproveRequest(BaseModel):
+    epics: list[EpicOut] = []
+
+
+class RequirementApproveResponse(BaseModel):
+    analysis_id: uuid.UUID
+    task_ids: list[uuid.UUID]
+
+
 # ---------- Client Dashboard ----------
 class ClientDashboardOut(BaseModel):
     project_id: uuid.UUID
@@ -260,6 +307,40 @@ class MeetingOut(BaseModel):
     deadlines: list[str] = []
     status: str
     created_at: datetime
+
+# ---------- Project Modules ----------
+class ProjectModuleCreate(BaseModel):
+    name: str
+    icon: Optional[str] = "🧩"
+    description: Optional[str] = None
+    status: Literal["locked", "in_progress", "completed"] = "locked"
+
+
+class ProjectModuleUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[Literal["locked", "in_progress", "completed"]] = None
+
+
+class ProjectModuleReorder(BaseModel):
+    ordered_ids: list[uuid.UUID]
+
+
+class ProjectModuleOut(BaseModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    icon: str
+    description: Optional[str] = None
+    status: str
+    order: int
+    created_by: uuid.UUID
+    created_at: datetime
+
+    class Config:
+        from_attributes = True    
 
     class Config:
         from_attributes = True
