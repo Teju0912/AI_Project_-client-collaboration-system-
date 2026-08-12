@@ -1,29 +1,5 @@
 """
-manager_merged.py
-
-Merged version of manager.py + teju_manager.py.
-
-After a full line-by-line comparison, manager.py was found to be a strict
-superset of teju_manager.py: every function, page, and helper in
-teju_manager.py exists in manager.py with the same or an improved
-implementation. manager.py additionally includes:
-
-  1. The full "Project Modules" workflow feature (imports:
-     get_project_modules, create_project_module, insert_project_module,
-     update_project_module, delete_project_module,
-     reorder_project_modules; constants MODULE_STATUS_META /
-     MODULE_ICON_OPTIONS; functions _get_project_modules,
-     _resequence_module_locks, _inject_module_flow_css,
-     _render_module_flow_card, _module_detail_dialog,
-     _manage_modules_dialog, _render_project_modules_section) — entirely
-     absent from teju_manager.py.
-  2. A bug fix in the Tasks page dialog handling: opening/creating an
-     issue now properly clears the other dialog's session-state flag
-     (elif instead of two independent ifs), and switching sidebar pages
-     clears module/task dialog state too — teju_manager.py did not have
-     this fix.
-
-No function from either file was removed.
+manager.py
 """
 
 import datetime as dt
@@ -47,6 +23,7 @@ from api_client import (
 )
 from views.shared import (
     render_sidebar_header,
+    render_sidebar_logout,
     show_api_error,
     show_document_preview,
     session_token,
@@ -1190,6 +1167,23 @@ def _issue_detail_dialog(token, projects, task_id):
                     index=assignee_index, key=f"mgr_issue_assignee_{task_id}",
                     label_visibility="collapsed",
                 )
+
+                # Tasks created before module support can be linked here too.
+                task_modules = _get_project_modules(token, issue.get("project_id")) if issue.get("project_id") else []
+                module_options = [("No module", None)] + [
+                    (f"{m.get('icon', '🧩')} {m['name']}", str(m["id"]))
+                    for m in task_modules
+                ]
+                current_module_id = str(issue.get("module_id")) if issue.get("module_id") else None
+                module_index = next(
+                    (i for i, (_, module_id) in enumerate(module_options) if module_id == current_module_id),
+                    0,
+                )
+                st.markdown("**Module**")
+                new_module_label = st.selectbox(
+                    "Module", [label for label, _ in module_options], index=module_index,
+                    key=f"mgr_issue_module_{task_id}", label_visibility="collapsed",
+                )
  
                 st.markdown("**Priority**")
                 current_priority = issue.get("priority") or "medium"
@@ -1235,6 +1229,7 @@ def _issue_detail_dialog(token, projects, task_id):
                     field_payload = {
                         "status": new_status,
                         "assigned_to": dict(assignee_options).get(new_assignee_label),
+                        "module_id": dict(module_options).get(new_module_label),
                         "priority": new_priority,
                         "story_points": new_points,
                         "labels": new_labels,
@@ -1287,8 +1282,10 @@ def _parse_date_or_none(value):
  
  
 def _create_issue_dialog(token, projects, default_project_id):
-    """Jira-style 'Create issue' modal — new-issue mode of the same fields."""
- 
+    """Jira-style 'Create issue' modal — pick a project, pick a module
+    belonging to that project, and create ONE OR MANY tasks under that
+    module in a single submit."""
+
     @st.dialog("Create issue", width="large")
     def _dialog():
         users, users_ok = _fetch_users_safely(token)
@@ -1297,20 +1294,54 @@ def _create_issue_dialog(token, projects, default_project_id):
         assignee_options = [("Unassigned", None)] + [
             (_user_option_label(u), u.get("id")) for u in assignable
         ]
- 
+
         project_names = [p["name"] for p in projects]
         default_index = 0
         if default_project_id is not None:
             matching = [p["name"] for p in projects if str(p.get("id")) == str(default_project_id)]
             if matching:
                 default_index = project_names.index(matching[0])
- 
+
+        # Project + Module pickers live OUTSIDE the form so the module
+        # list refreshes reactively when the project selection changes.
+        project_label = st.selectbox(
+            "Project", project_names, index=default_index,
+            key="mgr_create_issue_project",
+        )
+        selected_project = next((p for p in projects if p["name"] == project_label), None)
+        project_id = selected_project["id"] if selected_project else None
+
+        modules = _get_project_modules(token, project_id) if project_id else []
+        module_options = [("No module", None)] + [
+            (f"{m.get('icon', '🧩')} {m['name']}", m["id"]) for m in modules
+        ]
+        if project_id and not modules:
+            st.caption(
+                "This project has no modules yet — you can still create "
+                "tasks without one, or add modules from the Projects tab."
+            )
+
+        module_label = st.selectbox(
+            "Module", [label for label, _ in module_options],
+            key="mgr_create_issue_module",
+        )
+        module_id = dict(module_options).get(module_label)
+
+        st.divider()
+        st.caption(
+            "Enter one task title per line to create several tasks at once "
+            "— they'll all be created under the module and settings chosen above."
+        )
+
         with st.form("mgr_create_issue_form", clear_on_submit=True):
-            project_label = st.selectbox("Project", project_names, index=default_index)
-            title = st.text_input("Title")
-            description = st.text_area("Description", height=100)
+            titles_raw = st.text_area(
+                "Task title(s)",
+                key="mgr_create_issue_titles", height=110,
+                placeholder="e.g.\nDesign login screen\nImplement login API\nWrite login tests",
+            )
+            description = st.text_area("Description (applied to all)", height=100)
             epic = st.text_input("Epic (optional)")
- 
+
             col_a, col_b, col_c = st.columns(3)
             with col_a:
                 status = st.selectbox(
@@ -1324,52 +1355,62 @@ def _create_issue_dialog(token, projects, default_project_id):
                 )
             with col_c:
                 story_points = st.number_input("Story points", min_value=0.0, step=0.5, value=0.0)
- 
-            # ---- NEW: start date / deadline ----
+
             col_d, col_e = st.columns(2)
             with col_d:
                 start_date = st.date_input("Start date", value=None)
             with col_e:
                 deadline = st.date_input("Deadline", value=None)
- 
+
             assignee_label = st.selectbox("Assign to", [label for label, _ in assignee_options])
             labels_str = st.text_input("Labels (comma-separated)", placeholder="frontend, bug")
- 
-            if st.form_submit_button("Create issue", type="primary"):
-                project_id = next((p["id"] for p in projects if p["name"] == project_label), None)
-                if not title.strip():
-                    st.error("Title is required.")
+
+            if st.form_submit_button("Create issue(s)", type="primary"):
+                titles = [t.strip() for t in titles_raw.splitlines() if t.strip()]
+                if not titles:
+                    st.error("Enter at least one task title.")
                 elif project_id is None:
                     st.error("Select a project.")
                 elif start_date and deadline and deadline < start_date:
                     st.error("Deadline can't be before the start date.")
                 else:
                     labels_list = [l.strip() for l in labels_str.split(",") if l.strip()]
-                    payload = {
-                        "title": title.strip(),
-                        "description": description or None,
-                        "epic": epic.strip() or None,
-                        "status": status,
-                        "priority": priority,
-                        "story_points": story_points,
-                        "labels": labels_list,
-                        "project_id": project_id,
-                        "assigned_to": dict(assignee_options).get(assignee_label),
-                        "start_date": start_date.isoformat() if start_date else None,
-                        "deadline": deadline.isoformat() if deadline else None,
-                    }
-                    resp = create_task(token, payload)
-                    if resp.status_code in {200, 201}:
-                        st.success("Issue created.")
+                    created, failures = 0, []
+                    for title in titles:
+                        payload = {
+                            "title": title,
+                            "description": description or None,
+                            "epic": epic.strip() or None,
+                            "status": status,
+                            "priority": priority,
+                            "story_points": story_points,
+                            "labels": labels_list,
+                            "project_id": project_id,
+                            "module_id": module_id,
+                            "assigned_to": dict(assignee_options).get(assignee_label),
+                            "start_date": start_date.isoformat() if start_date else None,
+                            "deadline": deadline.isoformat() if deadline else None,
+                        }
+                        resp = create_task(token, payload)
+                        if resp.status_code in {200, 201}:
+                            created += 1
+                        else:
+                            failures.append((title, resp))
+
+                    if created:
+                        st.success(f"Created {created} issue(s).")
+                    for title, resp in failures:
+                        st.error(f"Failed to create '{title}':")
+                        show_api_error(resp)
+
+                    if created and not failures:
                         st.session_state["mgr_show_create_issue"] = False
                         st.rerun()
-                    else:
-                        show_api_error(resp)
- 
+
         if st.button("Cancel"):
             st.session_state["mgr_show_create_issue"] = False
             st.rerun()
- 
+
     _dialog()
  
  
@@ -1401,8 +1442,19 @@ def _issue_card(t, project_by_id):
             st.session_state["mgr_show_create_issue"] = False
             st.session_state["mgr_open_issue_id"] = t["id"]
             st.rerun()
- 
- 
+
+
+def _completed_at(task):
+    """Return a timezone-naive completion datetime, or None for older tasks."""
+    value = task.get("completed_at")
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
 def _render_manager_tasks(projects, token):
     st.title("✅ Tasks")
     st.caption("Jira-style issue tracker — search, filter, and open any issue for full detail.")
@@ -1453,7 +1505,16 @@ def _render_manager_tasks(projects, token):
             st.session_state["mgr_open_issue_id"] = None
             st.session_state["mgr_show_create_issue"] = True
  
-    filtered = tasks
+    # Keep Done visible on the board for three hours after completion. Older
+    # completed work remains available in the Done tasks dropdown below.
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=3)
+    board_tasks = [
+        task for task in tasks
+        if (task.get("status") or "todo") != "done"
+        or (_completed_at(task) is not None and _completed_at(task) > cutoff)
+    ]
+
+    filtered = board_tasks
     if search_query.strip():
         q = search_query.strip().lower()
         filtered = [t for t in filtered if q in (t.get("title") or "").lower()]
@@ -1462,7 +1523,10 @@ def _render_manager_tasks(projects, token):
     if priority_filter:
         filtered = [t for t in filtered if (t.get("priority") or "medium") in priority_filter]
  
-    st.caption(f"Showing **{len(filtered)}** of {len(tasks)} issues in **{project_label}**")
+    st.caption(
+        f"Showing **{len(filtered)}** active issues in **{project_label}**. "
+        "Done issues move to the completed list after 3 hours."
+    )
     st.write("")
  
     # ---- Kanban board: one column per status, same card/dialog in each ----
@@ -1482,6 +1546,56 @@ def _render_manager_tasks(projects, token):
                     st.caption("No issues here.")
                 for t in col_tasks:
                     _issue_card(t, project_by_id)
+
+    # Completed tasks are retained with their full Jira details. Selecting a
+    # project here keeps the archive independent from the active board view.
+    with st.expander("✅ Done tasks", expanded=False):
+        if not projects:
+            st.info("No projects available.")
+        else:
+            done_project_names = [project["name"] for project in projects]
+            done_project_label = st.selectbox(
+                "Select project", done_project_names, key="mgr_done_tasks_project_dropdown"
+            )
+            done_project = next(
+                (project for project in projects if project["name"] == done_project_label), None
+            )
+            done_resp = get_tasks(token, project_id=str(done_project["id"]))
+            if done_resp.status_code != 200:
+                show_api_error(done_resp)
+            else:
+                done_tasks = [
+                    task for task in done_resp.json()
+                    if (task.get("status") or "todo") == "done"
+                ]
+                done_tasks.sort(
+                    key=lambda task: _completed_at(task) or dt.datetime.min,
+                    reverse=True,
+                )
+                if not done_tasks:
+                    st.caption("No completed tasks for this project.")
+                for task in done_tasks:
+                    completed_at = _completed_at(task)
+                    st.markdown(f"**{task.get('title') or 'Untitled task'}**")
+                    st.caption(
+                        "Completed " + completed_at.strftime("%d %b %Y, %I:%M %p")
+                        if completed_at else "Completed (completion time unavailable)"
+                    )
+                    open_col, review_col = st.columns(2)
+                    with open_col:
+                        if st.button("Open", key=f"mgr_done_open_{task['id']}", use_container_width=True):
+                            st.session_state["mgr_show_create_issue"] = False
+                            st.session_state["mgr_open_issue_id"] = task["id"]
+                            st.rerun()
+                    with review_col:
+                        if st.button("Review", key=f"mgr_done_review_{task['id']}", use_container_width=True):
+                            review_resp = patch_task_status(token, str(task["id"]), {"status": "testing"})
+                            if review_resp.status_code == 200:
+                                st.success("Task moved to Testing for review.")
+                                st.rerun()
+                            else:
+                                show_api_error(review_resp)
+                    st.divider()
  
     # ---- Launch dialogs based on session state ----
     if st.session_state.get("mgr_show_create_issue"):
@@ -1635,7 +1749,6 @@ def _project_task_progress(project_id, tasks):
     done = sum(1 for t in linked if (t.get("status") or "") == "done")
     return round(100 * done / len(linked)), done, len(linked)
 
-
 def _get_project_modules(token, project_id):
     """Load persisted modules from the backend, ordered by workflow position."""
     resp = get_project_modules(token, str(project_id))
@@ -1732,8 +1845,12 @@ def _inject_module_flow_css():
         unsafe_allow_html=True,
     )
     
-def _render_module_flow_card(token, project_id, module):
+def _render_module_flow_card(token, project_id, module, module_tasks=None):
     meta = MODULE_STATUS_META[module["status"]]
+    module_tasks = module_tasks or []
+    total_tasks = len(module_tasks)
+    completed_tasks = sum(1 for t in module_tasks if (t.get("status") or "") == "done")
+
     with st.container(border=True):
         st.markdown(
             f"<span class='module-anchor module-anchor-{module['status']}'></span>",
@@ -1746,6 +1863,21 @@ def _render_module_flow_card(token, project_id, module):
             f"</div>",
             unsafe_allow_html=True,
         )
+
+        # Task summary line — "5 tasks · 4 completed"
+        if total_tasks:
+            st.markdown(
+                f"<div style='font-size:0.8rem;color:#6B7280;margin-bottom:6px;'>"
+                f"{total_tasks} task{'s' if total_tasks != 1 else ''} · "
+                f"{completed_tasks} completed</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='font-size:0.8rem;color:#9CA3AF;margin-bottom:6px;'>No tasks yet</div>",
+                unsafe_allow_html=True,
+            )
+
         st.write("")
 
         if st.button("👁️ Open", key=f"mod_open_{project_id}_{module['id']}",
@@ -1951,7 +2083,6 @@ def _manage_modules_dialog(token, project_id):
             st.rerun()
 
     _dialog()
-
 def _render_project_modules_section(projects, token):
     st.subheader("🧩 Project Modules")
     st.caption("Break a project into a step-by-step workflow that your team completes in order.")
@@ -1977,6 +2108,20 @@ def _render_project_modules_section(projects, token):
         _manage_modules_dialog(token, project_id)
 
     modules = _get_project_modules(token, project_id)
+
+    # NEW: fetch this project's tasks once, then group them by module_id
+    # so every flow card can show "X tasks · Y completed" without an
+    # extra API call per card.
+    tasks_resp = get_tasks(token, project_id=project_id)
+    project_tasks = tasks_resp.json() if tasks_resp.status_code == 200 else []
+    if tasks_resp.status_code != 200:
+        show_api_error(tasks_resp)
+
+    tasks_by_module = {}
+    for t in project_tasks:
+        mid = str(t.get("module_id")) if t.get("module_id") else None
+        tasks_by_module.setdefault(mid, []).append(t)
+
     st.write("")
 
     if not modules:
@@ -1996,7 +2141,8 @@ def _render_project_modules_section(projects, token):
         col_i = 0
         for i, module in enumerate(modules):
             with cols[col_i]:
-                _render_module_flow_card(token, project_id, module)
+                module_tasks = tasks_by_module.get(str(module["id"]), [])
+                _render_module_flow_card(token, project_id, module, module_tasks)
             col_i += 1
             if i < n - 1:
                 with cols[col_i]:
@@ -2025,7 +2171,6 @@ def _render_project_modules_section(projects, token):
         st.write("")
         st.markdown(f"**{completed_n} of {len(modules)} modules complete**")
         st.progress(pct / 100, text=f"{pct}%")
-
 
 
 # --------------------------------------------------------------------------
@@ -2850,6 +2995,7 @@ def render_manager_app():
             label_visibility="collapsed",
             key=NAV_RADIO_KEY,
         )
+        render_sidebar_logout()
 
     # Clear task-dialog flags on navigation so a dialog closed with X/Esc
     # cannot reopen automatically after returning to the Tasks page.
