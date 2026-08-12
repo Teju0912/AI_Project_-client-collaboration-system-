@@ -108,10 +108,14 @@ class Task(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    # Optional workflow module within the project that owns this task.
+    module_id = Column(UUID(as_uuid=True), ForeignKey("project_modules.id"), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     epic = Column(String(255), nullable=True)
     status = Column(String(50), nullable=False, default="todo")
+    # Set when work enters Done; used to keep the active board uncluttered.
+    completed_at = Column(DateTime, nullable=True)
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -244,6 +248,7 @@ class AIUsageLog(Base):
 
 
 class RequirementAnalysis(Base):
+    
     """
     Stored result of an AI requirement analysis run. The LLM's structured
     Epics -> Stories -> Tasks breakdown is saved here in status
@@ -262,6 +267,26 @@ class RequirementAnalysis(Base):
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class ProjectModule(Base):
+    """
+    Step-by-step workflow module for a project (e.g. "Auth", "Payments").
+    Modules unlock in order: only one is "in_progress" at a time, everything
+    after it is "locked" until the previous one is marked "completed".
+    """
+    __tablename__ = "project_modules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    icon = Column(String(10), nullable=False, default="🧩")
+    description = Column(Text, nullable=True)
+    # one of: "locked", "in_progress", "completed"
+    status = Column(String(50), nullable=False, default="locked")
+    order = Column(Integer, nullable=False, default=0)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)    
+
 
 # ---------------------------------------------------------------------------
 # NEXT MODULES — add tables here as you build them, following the same
@@ -274,7 +299,8 @@ class RequirementAnalysis(Base):
 #   class DocumentChunk(Base): ...  (RAG — chunk_text, embedding vector)      [DONE]
 #   class TaskComment(Base): ...    (Jira-style issue comments)               [DONE]
 #   class TaskLink(Base): ...       (Jira-style linked issues)                [DONE]
-#
+#   class TaskLink(Base): ...       (Jira-style linked issues)                [DONE]
+#   class ProjectModule(Base): ...  (project workflow steps)                  [DONE]
 # After adding a table, always run:
 #   alembic revision --autogenerate -m "add <table> table"
 #   alembic upgrade head
