@@ -7,7 +7,9 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import cast, or_
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import JSONB
 
 from database import get_db
 from dependencies import get_current_user, require_role
@@ -35,6 +37,8 @@ def create_task_record(
     status: str,
     assigned_to,
     created_by,
+    testing_assigned_to=None,
+    testing_status=None,
 ) -> Task:
     """
     Core Module 4 task-creation logic. Both the /tasks router endpoint and
@@ -50,6 +54,8 @@ def create_task_record(
         epic=epic,
         status=status,
         assigned_to=assigned_to,
+        testing_assigned_to=testing_assigned_to or [],
+        testing_status=testing_status,
         created_by=created_by,
     )
     db.add(task)
@@ -70,6 +76,8 @@ def serialize_task(task: Task) -> TaskOut:
         status=task.status,
         completed_at=task.completed_at,
         assigned_to=task.assigned_to,
+        testing_assigned_to=task.testing_assigned_to or [],
+        testing_status=task.testing_status,
         created_by=task.created_by,
         created_at=task.created_at,
     )
@@ -93,7 +101,10 @@ def list_tasks(
             query = query.filter(Task.project_id == project_id)
     elif current_user.role == "employee":
         # Employee: only tasks assigned to them
-        query = query.filter(Task.assigned_to == current_user.id)
+        query = query.filter(or_(
+            Task.assigned_to == current_user.id,
+            cast(Task.testing_assigned_to, JSONB).contains([str(current_user.id)]),
+        ))
         if project_id is not None:
             query = query.filter(Task.project_id == project_id)
     elif current_user.role == "client":
@@ -155,6 +166,8 @@ def create_task(
         epic=payload.epic,
         status=payload.status,
         assigned_to=payload.assigned_to,
+        testing_assigned_to=payload.testing_assigned_to,
+        testing_status=payload.testing_status,
         created_by=current_user.id,
     )
     return serialize_task(task)
@@ -178,22 +191,39 @@ def update_task_status(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    is_tester = str(current_user.id) in {
+        str(tester_id) for tester_id in (task.testing_assigned_to or [])
+    }
+
     if current_user.role == "manager":
         if task.project_id is None:
             raise HTTPException(status_code=403, detail="Not authorized for this task")
         assert_manager_can_access_project(db, current_user, task.project_id)
     elif current_user.role not in {"admin"} and task.assigned_to != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the assignee or admin/manager can change task status",
+        is_valid_testing_transition = (
+            (payload.status == "in_progress" and payload.testing_status == "accepted")
+            or (payload.status == "testing" and payload.testing_status == "submitted")
+            or (payload.status is None and payload.testing_status in {"accepted", "submitted"})
         )
+        if not is_tester or not is_valid_testing_transition:
+            raise HTTPException(
+                status_code=403,
+                detail="Only assigned testers can update the testing workflow",
+            )
 
-    previous_status = task.status
-    task.status = payload.status
-    if payload.status != "done":
-        task.completed_at = None
-    elif previous_status != "done":
-        task.completed_at = datetime.utcnow()
+    if payload.status is not None:
+        previous_status = task.status
+        task.status = payload.status
+        if payload.status != "done":
+            task.completed_at = None
+        elif previous_status != "done":
+            task.completed_at = datetime.utcnow()
+    if is_tester and payload.status == "in_progress":
+        task.testing_status = "accepted"
+    elif is_tester and payload.status == "testing":
+        task.testing_status = "submitted"
+    elif payload.testing_status is not None:
+        task.testing_status = payload.testing_status
     db.commit()
     db.refresh(task)
     return serialize_task(task)
@@ -266,6 +296,18 @@ def update_task(
             raise HTTPException(status_code=400, detail="Tasks can only be assigned to staff users")
         if target_project_id is not None:
             ensure_project_member(db, target_project_id, assigned_user.id)
+
+    if "testing_assigned_to" in changes:
+        tester_ids = changes["testing_assigned_to"] or []
+        testers = db.query(User).filter(
+            User.id.in_(tester_ids),
+            User.organization_id == current_user.organization_id,
+        ).all() if tester_ids else []
+        if len(testers) != len(set(tester_ids)) or any(tester.role != "employee" for tester in testers):
+            raise HTTPException(status_code=400, detail="Testing can only be assigned to organization employees")
+        if target_project_id is not None:
+            for tester in testers:
+                ensure_project_member(db, target_project_id, tester.id)
 
     previous_status = task.status
     for field, value in changes.items():

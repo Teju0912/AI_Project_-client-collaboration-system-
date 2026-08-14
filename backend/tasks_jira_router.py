@@ -98,6 +98,8 @@ class SubtaskOut(BaseModel):
     priority: str
     assigned_to: Optional[str]
     assigned_to_name: Optional[str]
+    testing_assigned_to: List[str]
+    testing_status: Optional[str]
 
 
 class TaskDetailOut(BaseModel):
@@ -172,6 +174,8 @@ def _serialize_detail(db: Session, task: Task) -> dict:
         "labels": task.labels or [],
         "assigned_to": str(task.assigned_to) if task.assigned_to else None,
         "assigned_to_name": _user_name(db, task.assigned_to),
+        "testing_assigned_to": [str(tester_id) for tester_id in (task.testing_assigned_to or [])],
+        "testing_status": task.testing_status,
         "created_by": str(task.created_by) if task.created_by else None,
         "created_by_name": _user_name(db, task.created_by),
         "created_at": task.created_at.isoformat() if task.created_at else "",

@@ -116,6 +116,8 @@ class Task(Base):
     status = Column(String(50), nullable=False, default="todo")
     # Set when work enters Done; used to keep the active board uncluttered.
     completed_at = Column(DateTime, nullable=True)
+    start_date = Column(Date, nullable=True)
+    deadline = Column(Date, nullable=True)
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -127,6 +129,8 @@ class Task(Base):
     story_points = Column(Numeric(5, 1), nullable=True)
     # simple list of strings, e.g. ["frontend", "bug"]
     labels = Column(JSON, nullable=False, default=list)
+    testing_assigned_to = Column(JSON, nullable=False, default=list)
+    testing_status = Column(String(20), nullable=True)
     # self-referencing FK -> lets a Task be a sub-task of another Task
     parent_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True, index=True)
 
@@ -255,13 +259,18 @@ class RequirementAnalysis(Base):
     "pending_review" until a human explicitly approves (creates real
     Project/Task rows) or rejects it. Nothing is written to the tasks table
     until that explicit Approve action.
+
+    The source document is optional at the database level because an analysis
+    may remain as project history even after its original uploaded document is
+    deleted. When the document is removed, the FK should resolve to NULL so the
+    analysis is preserved without blocking deletion.
     """
     __tablename__ = "requirement_analyses"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=True)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
     raw_output = Column(JSON, nullable=False)
     status = Column(String(50), nullable=False, default="pending_review")
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)

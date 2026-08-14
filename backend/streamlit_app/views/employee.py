@@ -14,6 +14,11 @@ downloaded, previewed, and uploaded to projects they belong to (no delete).
 
 DATA POLICY: every number, chart, and list is computed from live API
 responses (FastAPI → Postgres) — nothing is fabricated.
+
+NOTE: this file is a merge of two prior revisions. It keeps every function
+from both: the priority system, the dedicated "Testing assigned to you"
+panel (now wired into the My Tasks page), the lazy-download + reindex
+Documents flow, and the shared project-scoped filtering.
 """
 
 import datetime as dt
@@ -37,6 +42,7 @@ from views.shared import (
     session_token,
     session_user,
     rag_status_label,
+    trigger_reindex,
 )
 
 STATUS_META = {
@@ -50,6 +56,16 @@ PROJECT_STATUS_META = {
     "active":    {"label": "Active",    "color": "#22C55E"},
     "completed": {"label": "Completed", "color": "#3B82F6"},
     "on_hold":   {"label": "On Hold",   "color": "#F59E0B"},
+}
+
+# Task priority levels. `rank` controls sort order within a status column:
+# urgent (0) -> high (1) -> medium (2) -> low (3). Tasks with no/unknown
+# priority value are pushed to the end (see _priority_rank).
+PRIORITY_META = {
+    "urgent": {"label": "Urgent", "icon": "🔴", "color": "#EF4444", "rank": 0},
+    "high":   {"label": "High",   "icon": "🟠", "color": "#F59E0B", "rank": 1},
+    "medium": {"label": "Medium", "icon": "🟡", "color": "#EAB308", "rank": 2},
+    "low":    {"label": "Low",    "icon": "🟢", "color": "#22C55E", "rank": 3},
 }
 
 ALL_PROJECTS_LABEL = "All My Projects"
@@ -357,6 +373,94 @@ def _safe_json_list(response):
         st.error("Could not parse API response. Is the backend running?")
         return []
     return data if isinstance(data, list) else []
+
+
+def _priority_rank(task):
+    """Sort key for a task's priority: urgent -> high -> medium -> low.
+    Tasks with a missing/unrecognized priority value sort to the end
+    instead of breaking the ordering."""
+    p = (task.get("priority") or "").strip().lower()
+    return PRIORITY_META.get(p, {}).get("rank", 99)
+
+
+def _priority_pill(task):
+    """Small colored badge for a task's priority (urgent/high/medium/low).
+    Renders nothing if the task has no recognized priority value."""
+    p = (task.get("priority") or "").strip().lower()
+    meta = PRIORITY_META.get(p)
+    if not meta:
+        return
+    st.markdown(
+        f"<span class='status-pill' style='background:{meta['color']}1A;"
+        f"color:{meta['color']} !important;border:1px solid {meta['color']}55;'>"
+        f"{meta['icon']} {meta['label']}</span>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_employee_testing_section(token):
+    """Dedicated panel listing tasks a manager has sent this employee to
+    test (via testing_assigned_to). Kept as its own section — called from
+    the My Tasks page, above the workflow board — so testing assignments
+    are impossible to miss even though the same tasks also surface inside
+    the To Do / In Progress columns below."""
+    user = session_user() or {}
+    user_id = str(user.get("id") or "")
+    if not user_id:
+        return
+
+    all_tasks = _safe_json_list(get_tasks(token))
+    my_testing = [
+        task for task in all_tasks
+        if user_id in [str(tester_id) for tester_id in (task.get("testing_assigned_to") or [])]
+    ]
+    if not my_testing:
+        return
+
+    # Same priority ordering as My Tasks: urgent -> high -> medium -> low.
+    my_testing.sort(key=_priority_rank)
+
+    with st.container(border=True):
+        st.subheader("Testing assigned to you")
+        st.caption("Tasks a manager sent you to test — accept, test, then submit for review.")
+        for task in my_testing:
+            testing_status = task.get("testing_status")
+            row = st.columns([3, 1.6, 1.3])
+            with row[0]:
+                title_col, pill_col = st.columns([2, 1])
+                with title_col:
+                    st.markdown(f"**{task.get('title', '—')}**")
+                    task_status = STATUS_META.get(task.get("status") or "todo", {}).get("label", "—")
+                    st.caption(f"Task status: {task_status}")
+                with pill_col:
+                    _priority_pill(task)
+            with row[1]:
+                if testing_status == "submitted":
+                    st.markdown("<span style='color:#22C55E;font-weight:700;'>Sent for review</span>", unsafe_allow_html=True)
+                elif testing_status == "accepted":
+                    st.markdown("<span style='color:#3B82F6;font-weight:700;'>Testing in progress</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<span style='color:#EF4444;font-weight:700;'>Awaiting your accept</span>", unsafe_allow_html=True)
+            with row[2]:
+                if testing_status in (None, "assigned"):
+                    if st.button("Accept", key=f"emp_test_accept_{task['id']}", use_container_width=True, type="primary"):
+                        response = patch_task_status(token, str(task["id"]), {"testing_status": "accepted"})
+                        if response.status_code == 200:
+                            st.success("Testing accepted.")
+                            st.rerun()
+                        else:
+                            show_api_error(response)
+                elif testing_status == "accepted":
+                    if st.button("Submit for Review", key=f"emp_test_submit_{task['id']}", use_container_width=True, type="primary"):
+                        response = patch_task_status(token, str(task["id"]), {"testing_status": "submitted"})
+                        if response.status_code == 200:
+                            st.success("Sent back to manager for review.")
+                            st.rerun()
+                        else:
+                            show_api_error(response)
+                else:
+                    st.caption("With manager")
+            st.divider()
 
 
 def _ring(pct, color, height=170):
@@ -670,6 +774,10 @@ def _render_employee_tasks(projects, token):
     st.title("✅ My Tasks")
     st.caption("Tasks assigned to you. Move them through the workflow as you progress.")
 
+    # Dedicated panel for tasks a manager has sent this employee to test.
+    _render_employee_testing_section(token)
+    st.write("")
+
     active_project_id, project_label = _choose_active_project(projects)
     st.caption(f"Showing: **{project_label}**")
     st.write("")
@@ -684,10 +792,22 @@ def _render_employee_tasks(projects, token):
         return
 
     name_by_id = _project_name_map(projects)
+    employee_id = str((session_user() or {}).get("id") or "")
     grouped = {k: [] for k in STATUS_META}
     for t in tasks:
         sk = t.get("status") or "todo"
+        is_new_testing_assignment = (
+            employee_id in [str(tester_id) for tester_id in (t.get("testing_assigned_to") or [])]
+            and t.get("testing_status") in (None, "assigned")
+        )
+        if is_new_testing_assignment:
+            sk = "todo"
         grouped[sk if sk in grouped else "todo"].append(t)
+
+    # Within each workflow stage, order tasks by priority:
+    # urgent -> high -> medium -> low -> (no priority set).
+    for key in grouped:
+        grouped[key].sort(key=_priority_rank)
 
     # ---- Status count row — same _stat_card boxes as the Dashboard, one
     # per workflow stage (To Do / In Progress / Testing / Done). ----
@@ -729,8 +849,12 @@ def _render_employee_tasks(projects, token):
 
                 row = st.columns([3, 1.4, 1.3])
                 with row[0]:
-                    st.markdown(f"**{t.get('title', '—')}**")
-                    st.caption(f"📁 {proj_name}")
+                    title_col, pill_col = st.columns([2, 1.2])
+                    with title_col:
+                        st.markdown(f"**{t.get('title', '—')}**")
+                        st.caption(f"📁 {proj_name}")
+                    with pill_col:
+                        _priority_pill(t)
                 with row[1]:
                     if days is not None and key != "done":
                         tag_color = "#EF4444" if days < 0 else ("#F59E0B" if days <= 3 else "#22C55E")
@@ -741,9 +865,15 @@ def _render_employee_tasks(projects, token):
                             unsafe_allow_html=True,
                         )
                 with row[2]:
+                    is_testing_assignment = employee_id in [
+                        str(tester_id) for tester_id in (t.get("testing_assigned_to") or [])
+                    ]
                     if key == "todo":
                         if st.button("✅ Accept", key=f"accept_{t['id']}", use_container_width=True, type="primary"):
-                            resp = patch_task_status(token, str(t["id"]), {"status": "in_progress"})
+                            payload = {"status": "in_progress"}
+                            if is_testing_assignment:
+                                payload["testing_status"] = "accepted"
+                            resp = patch_task_status(token, str(t["id"]), payload)
                             if resp.status_code == 200:
                                 st.success("Task accepted — moved to In Progress.")
                                 st.rerun()
@@ -751,7 +881,10 @@ def _render_employee_tasks(projects, token):
                                 show_api_error(resp)
                     elif key == "in_progress":
                         if st.button("📤 Submit for Review", key=f"submit_{t['id']}", use_container_width=True, type="primary"):
-                            resp = patch_task_status(token, str(t["id"]), {"status": "testing"})
+                            payload = {"status": "testing"}
+                            if is_testing_assignment:
+                                payload["testing_status"] = "submitted"
+                            resp = patch_task_status(token, str(t["id"]), payload)
                             if resp.status_code == 200:
                                 st.success("Sent to your manager for review.")
                                 st.rerun()
@@ -831,14 +964,15 @@ def _render_employee_projects(projects, token):
 
 # --------------------------------------------------------------------------
 # DOCUMENTS — upload + view/download/preview, scoped to own projects
-# (Reindex button removed — employees no longer trigger re-indexing.)
 # --------------------------------------------------------------------------
 def _render_employee_documents(projects, token):
     st.title("📄 Documents")
     st.caption("View and download project documents. Upload files to projects you're on.")
+
+    active_project_id, project_label = _choose_active_project(projects)
+    st.caption(f"Showing: **{project_label}**")
     st.write("")
 
-    # ---- Upload -------------------------------------------------------
     with st.container(border=True):
         st.subheader("⬆️ Upload a document")
         if not projects:
@@ -849,11 +983,24 @@ def _render_employee_documents(projects, token):
 
             with st.form("employee_upload_document_form", clear_on_submit=True):
                 project_names = [p["name"] for p in projects]
+                default_index = 0
+                if active_project_id is not None:
+                    matching = [
+                        p["name"] for p in projects
+                        if str(p.get("id")) == str(active_project_id)
+                    ]
+                    if matching:
+                        default_index = project_names.index(matching[0])
+
                 upload_project_label = st.selectbox(
-                    "Project", project_names, key="employee_upload_project_select",
+                    "Project",
+                    project_names,
+                    index=default_index,
+                    key="employee_upload_project_select",
                 )
                 uploaded_file = st.file_uploader(
-                    "Choose a file", type=None,
+                    "Choose a file",
+                    type=None,
                     key=f"employee_doc_uploader_{st.session_state['employee_doc_uploader_key']}",
                 )
                 if st.form_submit_button("Upload", type="primary"):
@@ -861,9 +1008,12 @@ def _render_employee_documents(projects, token):
                         st.warning("Please choose a file first.")
                     else:
                         upload_project_id = next(
-                            (p["id"] for p in projects if p["name"] == upload_project_label), None
+                            (p["id"] for p in projects if p["name"] == upload_project_label),
+                            None,
                         )
-                        resp = upload_document(token, uploaded_file, project_id=str(upload_project_id))
+                        resp = upload_document(
+                            token, uploaded_file, project_id=str(upload_project_id)
+                        )
                         if resp.status_code in (200, 201):
                             st.session_state["employee_doc_uploader_key"] += 1
                             data = resp.json() if resp.content else {}
@@ -876,7 +1026,7 @@ def _render_employee_documents(projects, token):
                             else:
                                 st.success(
                                     f"Uploaded to **{upload_project_label}**. "
-                                    "No text extracted — use a "
+                                    "No text extracted — use Reindex or a "
                                     "PDF/DOCX/PPTX/TXT file."
                                 )
                             st.rerun()
@@ -885,44 +1035,20 @@ def _render_employee_documents(projects, token):
 
     st.write("")
 
-    docs_resp = list_documents(token)
-    if docs_resp.status_code != 200:
-        show_api_error(docs_resp)
-        return
+    docs_resp = list_documents(token, project_id=active_project_id)
     documents = _safe_json_list(docs_resp)
+    if docs_resp.status_code != 200:
+        return
 
     if not documents:
         st.info("No documents to show for this selection.")
         return
 
     name_by_id = _project_name_map(projects)
-
-    # ---- All Documents — filterable by project -------------------------
     with st.container(border=True):
-        st.subheader("All Documents")
-        st.caption("Upload PDF/DOCX/PPTX/TXT to enable chat RAG. Files are indexed on upload.")
-
-        doc_filter_options = ["All Documents"] + [p.get("name", "—") for p in projects]
-        selected_doc_filter = st.selectbox(
-            "📁 Filter by project", doc_filter_options,
-            key="employee_documents_project_filter",
-        )
-
-        if selected_doc_filter == "All Documents":
-            filtered_documents = documents
-        else:
-            filter_project = next(
-                (p for p in projects if p.get("name") == selected_doc_filter), None
-            )
-            filtered_documents = [
-                d for d in documents if str(d.get("project_id")) == str(filter_project.get("id"))
-            ] if filter_project else []
-
-        if not filtered_documents:
-            st.info("No documents for this selection.")
-
-        for doc in filtered_documents:
-            row = st.columns([3, 1, 1])
+        st.subheader(f"Documents — {project_label}")
+        for doc in documents:
+            row = st.columns([3, 1, 1, 1])
             with row[0]:
                 st.markdown(f"📄 **{doc.get('filename', '—')}**")
                 pid = doc.get("project_id")
@@ -930,19 +1056,45 @@ def _render_employee_documents(projects, token):
                     st.caption(f"📁 {name_by_id.get(str(pid), 'Project')}")
                 st.caption(rag_status_label(doc))
             with row[1]:
-                resp = download_document(token, str(doc["id"]))
-                if resp.status_code == 200:
+                # Lazy download: fetch the file only when the user asks for
+                # it, instead of downloading every document on every rerun.
+                dl_state_key = f"employee_dl_ready_{doc['id']}"
+                if st.session_state.get(dl_state_key):
+                    ready = st.session_state[dl_state_key]
                     st.download_button(
-                        "Download", data=resp.content, file_name=doc["filename"],
+                        "Save file",
+                        data=ready["content"],
+                        file_name=ready["filename"],
                         mime="application/octet-stream",
-                        key=f"employee_dl_{doc['id']}", use_container_width=True,
+                        key=f"employee_dl_save_{doc['id']}",
+                        use_container_width=True,
                     )
                 else:
-                    show_api_error(resp)
+                    if st.button(
+                        "Download",
+                        key=f"employee_dl_prep_{doc['id']}",
+                        use_container_width=True,
+                    ):
+                        resp = download_document(token, str(doc["id"]))
+                        if resp.status_code == 200:
+                            st.session_state[dl_state_key] = {
+                                "content": resp.content,
+                                "filename": doc.get("filename", "file"),
+                            }
+                            st.rerun()
+                        else:
+                            show_api_error(resp)
             with row[2]:
-                if st.button("Preview", key=f"employee_view_{doc['id']}", use_container_width=True):
+                if st.button(
+                    "Preview",
+                    key=f"employee_view_{doc['id']}",
+                    use_container_width=True,
+                ):
                     show_document_preview(token, doc)
+            with row[3]:
+                trigger_reindex(token, doc, key=f"employee_reindex_{doc['id']}")
             st.divider()
+
 
 # --------------------------------------------------------------------------
 # APP ENTRY

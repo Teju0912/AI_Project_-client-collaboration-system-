@@ -265,47 +265,82 @@ def generate_ai_tasks(token: str, project_name: str, description: str):
 
 
 # ---------- AI Requirement Analyzer ----------
+# ---------- AI Requirement Analyzer (Draft -> Review Drafts -> Approve) ----------
 def analyze_requirement(token: str, document_id: str, project_id: str):
-    """POST /ai/analyze-requirement — returns a pending_review analysis."""
-    payload = {
-        "document_id": document_id,
-        "project_id": project_id,
-    }
-    return api_request(
-        "POST",
-        "/ai/analyze-requirement",
-        token=token,
-        json_body=payload,
-    )
+    """POST /ai/analyze-requirement — creates a pending_review DRAFT only."""
+    payload = {"document_id": document_id, "project_id": project_id}
+    return api_request("POST", "/ai/analyze-requirement", token=token, json_body=payload)
+
+
+def list_requirement_analyses(
+    token: str,
+    status: Optional[str] = None,
+    project_id: Optional[str] = None,
+):
+    """GET /ai/requirement-analyses — list drafts for the Review Drafts screen."""
+    params = []
+    if status:
+        params.append(f"status={status}")
+    if project_id:
+        params.append(f"project_id={project_id}")
+    path = "/ai/requirement-analyses"
+    if params:
+        path += "?" + "&".join(params)
+    return api_request("GET", path, token=token)
 
 
 def get_requirement_analysis(token: str, analysis_id: str):
-    """GET /ai/requirement-analyses/{id} — fetch one for review."""
+    """GET /ai/requirement-analyses/{id} — full detail (parsed epics/stories)."""
+    return api_request("GET", f"/ai/requirement-analyses/{analysis_id}", token=token)
+
+
+def approve_requirement_story(
+    token: str,
+    analysis_id: str,
+    *,
+    epic_index: int,
+    story_index: int,
+    priority: str,
+    module_id: str,
+    assigned_to: str,
+    deadline: Optional[str] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+):
+    """POST /ai/requirement-analyses/{id}/approve-story — approve ONE story
+    with module_id + assigned_to + priority + deadline. Creates ONE real
+    Task via the existing create_task logic."""
+    payload = {
+        "epic_index": epic_index,
+        "story_index": story_index,
+        "priority": priority,
+        "module_id": module_id,
+        "assigned_to": assigned_to,
+    }
+    if deadline:
+        payload["deadline"] = deadline
+    if title is not None:
+        payload["title"] = title
+    if description is not None:
+        payload["description"] = description
     return api_request(
-        "GET",
-        f"/ai/requirement-analyses/{analysis_id}",
-        token=token,
+        "POST", f"/ai/requirement-analyses/{analysis_id}/approve-story",
+        token=token, json_body=payload,
     )
 
 
 def approve_requirement_analysis(token: str, analysis_id: str, epics: list):
-    """POST /ai/requirement-analyses/{id}/approve — create tasks from edited epics."""
+    """POST /ai/requirement-analyses/{id}/approve — bulk approve; every
+    story dict must already include module_id + assigned_to."""
     return api_request(
-        "POST",
-        f"/ai/requirement-analyses/{analysis_id}/approve",
-        token=token,
-        json_body={"epics": epics},
+        "POST", f"/ai/requirement-analyses/{analysis_id}/approve",
+        token=token, json_body={"epics": epics},
     )
 
 
 def reject_requirement_analysis(token: str, analysis_id: str):
     """POST /ai/requirement-analyses/{id}/reject — mark rejected, no tasks."""
-    return api_request(
-        "POST",
-        f"/ai/requirement-analyses/{analysis_id}/reject",
-        token=token,
-    )
-
+    return api_request("POST", f"/ai/requirement-analyses/{analysis_id}/reject", token=token)
 
 # ---------- Weekly Reports ----------
 def generate_weekly_report(token: str, project_id: str):

@@ -1,5 +1,5 @@
 """
-admin_merged.py
+admin.py
 
 Merged version: combines teju_admin.py + admin.py so no function is lost.
 
@@ -14,6 +14,7 @@ Merged version: combines teju_admin.py + admin.py so no function is lost.
 """
 
 import datetime as dt
+import html
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -21,12 +22,13 @@ import plotly.graph_objects as go
 from api_client import (
     get_clients, get_projects, get_tasks, list_documents, get_users,
     get_team, create_project, update_project, assign_team,
-    get_project_modules,
+    get_project_modules, create_project_module,
     create_client, update_client, delete_client,
     patch_task_status, create_task, update_task, delete_task,
     upload_document, download_document, delete_document,
     generate_weekly_report, get_weekly_reports,
-    analyze_requirement, approve_requirement_analysis, reject_requirement_analysis,
+    analyze_requirement, get_requirement_analysis, list_requirement_analyses,
+    approve_requirement_story, approve_requirement_analysis, reject_requirement_analysis,
 )
 from views.shared import (
     render_sidebar_header,
@@ -74,6 +76,13 @@ IMPLEMENTED_PAGES = {
     "🧠 Requirement Analyzer",
 }
 NAV_RADIO_KEY = "admin_nav_radio"
+
+# Requirement Analyzer tabs and session keys
+MODULE_ICON_OPTIONS = ["🧩", "👤", "👥", "💳", "🔔", "⚙️", "🔐", "📦", "🔗", "📊", "🧪", "📁"]
+ALL_PROJECTS_LABEL = "All Projects"
+REQ_ANALYZER_TAB_ANALYZE = "Analyze Document"
+REQ_ANALYZER_TAB_REVIEW = "Review Drafts"
+REQ_ANALYZER_TAB_KEY = "admin_req_analyzer_view"
 
 
 # --------------------------------------------------------------------------
@@ -252,8 +261,7 @@ def _inject_light_theme():
         "div[data-testid='stSelectboxVirtualDropdown'] * { background-color: #FFFFFF !important; color: #111827 !important; }",
         "div[data-testid='stSelectboxVirtualDropdown'] li:hover,",
         "div[data-testid='stSelectboxVirtualDropdown'] div[aria-selected='true'] { background-color: #F3F4F6 !important; }",
-
-
+        "",
         "span[data-baseweb='tag'] {",
         "    background-color: #EEF2FF !important; color: #4338CA !important; border-radius: 6px !important;",
         "}",
@@ -451,6 +459,20 @@ def _split_staff(users):
     managers = [u for u in users if (u.get("role") or "").lower() == "manager"]
     employees = [u for u in users if (u.get("role") or "").lower() == "employee"]
     return managers, employees
+
+
+def _pill_html(text, cls):
+    """Render a pill badge as HTML with a CSS class."""
+    return f"<span class='pill {cls}'>{text}</span>"
+
+
+def _get_project_modules(token, project_id):
+    """Load persisted modules from the backend, ordered by workflow position."""
+    resp = get_project_modules(token, str(project_id))
+    if resp.status_code == 200:
+        return resp.json()
+    show_api_error(resp)
+    return []
 
 
 def _project_task_progress(project_id, tasks):
@@ -1761,10 +1783,504 @@ def _render_admin_weekly_reports():
             st.markdown(report.get("report_text", "—"))
 
 
+# --------------------------------------------------------------------------
+# REQUIREMENT ANALYZER — Analyze (creates draft) + Review Drafts (assign
+# Module/Employee/Priority/Deadline per story, approve one at a time)
+# --------------------------------------------------------------------------
+
+def _req_analyzer_priority_options():
+    return ["low", "medium", "high"]
+
+
+def _inject_requirement_analyzer_css():
+    """Page-scoped polish for the Requirement Analyzer — matches the
+    admin violet theme (#4F46E5) already used app-wide."""
+    st.markdown(
+        """
+        <style>
+        /* Segmented pill toggle (Analyze / Review Drafts) */
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] > div {
+            background: #F3F4F6 !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 999px !important;
+            padding: 4px !important;
+            gap: 4px !important;
+            box-shadow: inset 0 1px 2px rgba(16,24,40,0.04);
+        }
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label {
+            border-radius: 999px !important;
+            border: none !important;
+            padding: 8px 18px !important;
+            font-weight: 600 !important;
+            color: #6B7280 !important;
+            background: transparent !important;
+            transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+        }
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label:hover {
+            background: #FFFFFF !important;
+            color: #4338CA !important;
+        }
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label[data-checked="true"],
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label:has(input:checked) {
+            background: #4F46E5 !important;
+            color: #FFFFFF !important;
+            box-shadow: 0 1px 3px rgba(79,70,229,0.35);
+        }
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label[data-checked="true"] *,
+        .st-key-admin_req_analyzer_view [data-testid="stSegmentedControl"] label:has(input:checked) * {
+            color: #FFFFFF !important;
+        }
+
+        /* Section / story cards on this page */
+        .st-key-admin_req_page_root div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: #FFFFFF !important;
+            border: 1px solid #EEF0F3 !important;
+            border-radius: 14px !important;
+            box-shadow: 0 1px 3px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04) !important;
+            padding: 0.55rem 0.65rem !important;
+        }
+
+        /* Typography helpers used only on this page */
+        .req-page-subtitle {
+            color: #6B7280 !important;
+            font-size: 0.95rem;
+            line-height: 1.45;
+            margin: 0 0 1rem 0;
+        }
+        .req-section-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #111827 !important;
+            margin: 0 0 0.25rem 0;
+        }
+        .req-muted {
+            color: #6B7280 !important;
+            font-size: 0.85rem;
+        }
+        .req-epic-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #312E81 !important;
+            margin: 1rem 0 0.5rem 0;
+            padding-bottom: 0.35rem;
+            border-bottom: 1px solid #EEF2FF;
+        }
+        .req-story-title {
+            font-size: 0.98rem;
+            font-weight: 650;
+            color: #111827 !important;
+            margin-bottom: 0.15rem;
+        }
+        .req-draft-meta {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            color: #6B7280;
+            font-size: 0.82rem;
+            margin-top: 0.25rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_requirement_analyzer_analyze_tab(projects, token):
+    """Step 1: pick a doc, run AI analysis -> saves as pending_review DRAFT only.
+    Nothing appears anywhere else until it's approved in Review Drafts."""
+    with st.container(border=True):
+        st.markdown("<div class='req-section-title'>Analyze a requirement document</div>", unsafe_allow_html=True)
+
+        if not projects:
+            st.info("No projects found. Create a project and upload a requirement document first.")
+            return
+
+        project_labels = [p["name"] for p in projects]
+        project_label = st.selectbox("Project", project_labels, key="admin_req_project_select")
+        selected_project = next((p for p in projects if p["name"] == project_label), None)
+        if not selected_project:
+            return
+        project_id = str(selected_project["id"])
+
+        docs_resp = list_documents(token, project_id=project_id)
+        if docs_resp.status_code != 200:
+            show_api_error(docs_resp)
+            return
+        documents = docs_resp.json()
+
+        if not documents:
+            st.warning("No documents uploaded for this project yet. Upload a requirement file first.")
+            return
+
+        doc_labels = {d["filename"]: d for d in documents}
+        doc_label = st.selectbox(
+            "Requirement document", list(doc_labels.keys()), key="admin_req_doc_select"
+        )
+        selected_doc = doc_labels[doc_label]
+        document_id = str(selected_doc["id"])
+
+        st.write("")
+        if st.button("Analyze document", key="admin_req_analyze", type="primary"):
+            with st.spinner("Analyzing requirement document with AI..."):
+                resp = analyze_requirement(token, document_id, project_id)
+            if resp.status_code in {200, 201}:
+                data = resp.json()
+                st.session_state[REQ_ANALYZER_TAB_KEY] = REQ_ANALYZER_TAB_REVIEW
+                st.session_state["admin_reqdraft_selected_id"] = str(data["id"])
+                st.success(
+                    f"Draft ready (id: {data['id']}). Assign a Module and Employee, "
+                    "then approve stories into real tasks."
+                )
+                st.rerun()
+            else:
+                show_api_error(resp)
+
+
+def _render_review_drafts_list(projects, token):
+    """List all pending_review draft analyses. Admin clicks one to open it."""
+    with st.container(border=True):
+        st.markdown("<div class='req-section-title'>Pending drafts</div>", unsafe_allow_html=True)
+
+        project_names = [p["name"] for p in projects]
+        filter_label = st.selectbox(
+            "Filter by project",
+            [ALL_PROJECTS_LABEL] + project_names,
+            key="admin_reqdraft_project_filter",
+        )
+        filter_project_id = None
+        if filter_label != ALL_PROJECTS_LABEL:
+            matching = next((p for p in projects if p["name"] == filter_label), None)
+            filter_project_id = str(matching["id"]) if matching else None
+
+    resp = list_requirement_analyses(
+        token, status="pending_review", project_id=filter_project_id
+    )
+    if resp.status_code != 200:
+        show_api_error(resp)
+        return
+    drafts = resp.json()
+
+    st.write("")
+    if not drafts:
+        st.info("No pending drafts. Run an analysis from the Analyze Document view.")
+        return
+
+    for d in drafts:
+        with st.container(border=True):
+            row = st.columns([3.2, 1.2, 1.2, 1.3, 1])
+            with row[0]:
+                st.markdown(
+                    f"<div class='req-story-title'>{html.escape(str(d.get('document_filename') or 'Untitled document'))}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<span class='req-muted'>{html.escape(str(d.get('project_name') or 'No project'))}</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[1]:
+                st.markdown(
+                    f"<span class='req-muted'>📦 {d.get('epic_count', 0)} epics</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[2]:
+                st.markdown(
+                    f"<span class='req-muted'>📝 {d.get('story_count', 0)} stories</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[3]:
+                pending_n = d.get("pending_story_count", 0)
+                if pending_n:
+                    st.markdown(
+                        _pill_html(f"{pending_n} pending", "pill-orange"),
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        _pill_html("all created", "pill-green"),
+                        unsafe_allow_html=True,
+                    )
+            with row[4]:
+                if st.button(
+                    "Open",
+                    key=f"admin_reqdraft_open_{d['id']}",
+                    width="stretch",
+                ):
+                    st.session_state["admin_reqdraft_selected_id"] = str(d["id"])
+                    st.rerun()
+
+
+def _render_review_draft_detail(token, analysis_id):
+    """Open one draft: assign Module + Employee + Priority + Deadline per
+    story, then 'Approve & Create Task' calls the EXISTING create_task path
+    (via approve-story) for that one story only."""
+    resp = get_requirement_analysis(token, analysis_id)
+    if resp.status_code != 200:
+        show_api_error(resp)
+        if st.button("Back to Review Drafts", key="admin_reqdraft_back_err"):
+            st.session_state["admin_reqdraft_selected_id"] = None
+            st.rerun()
+        return
+    analysis = resp.json()
+
+    with st.container(border=True):
+        top_l, top_r = st.columns([4, 1])
+        with top_l:
+            st.markdown(
+                f"<div class='req-section-title'>{html.escape(str(analysis.get('document_filename') or 'Draft'))}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<span class='req-muted'>Project: {html.escape(str(analysis.get('project_name') or '—'))} · "
+                f"Status: {html.escape(str(analysis.get('status') or '—'))}</span>",
+                unsafe_allow_html=True,
+            )
+        with top_r:
+            if st.button("Back", key="admin_reqdraft_back", width="stretch"):
+                st.session_state["admin_reqdraft_selected_id"] = None
+                st.rerun()
+
+    if analysis.get("status") == "rejected":
+        st.info("This draft was rejected. No tasks were created.")
+        return
+
+    project_id = analysis.get("project_id")
+    if not project_id:
+        st.error("This draft has no linked project, so tasks can't be created from it.")
+        return
+    project_id = str(project_id)
+
+    # Existing modules for this project only — no separate module system.
+    modules = _get_project_modules(token, project_id)
+    module_options = [(f"{m.get('icon', '🧩')} {m['name']}", str(m["id"])) for m in modules]
+
+    st.write("")
+    with st.expander("Create a new module for this project", expanded=False):
+        with st.form(f"admin_reqdraft_new_module_{analysis_id}", clear_on_submit=True):
+            nm_col1, nm_col2 = st.columns([3, 1.4])
+            with nm_col1:
+                new_mod_name = st.text_input(
+                    "Module name", placeholder="e.g. Authentication"
+                )
+            with nm_col2:
+                new_mod_icon = st.selectbox(
+                    "Icon",
+                    MODULE_ICON_OPTIONS,
+                    key=f"admin_reqdraft_mod_icon_{analysis_id}",
+                )
+            new_mod_description = st.text_area(
+                "Description",
+                placeholder="Brief description of this module",
+                height=90,
+                key=f"admin_reqdraft_mod_desc_{analysis_id}",
+            )
+            if st.form_submit_button("Add module", type="primary"):
+                if not new_mod_name.strip():
+                    st.error("Module name is required.")
+                else:
+                    create_resp = create_project_module(
+                        token,
+                        project_id,
+                        {
+                            "name": new_mod_name.strip(),
+                            "icon": new_mod_icon,
+                            "status": "locked",
+                            "description": new_mod_description.strip() or None,
+                        },
+                    )
+                    if create_resp.status_code == 201:
+                        st.success(f"Module '{new_mod_name.strip()}' created.")
+                        st.rerun()
+                    else:
+                        show_api_error(create_resp)
+
+    users, _users_ok = _fetch_users_safely(token)
+    managers, employees = _split_staff(users)
+    assignable = managers + employees
+    employee_options = [(_user_option_label(u), str(u.get("id"))) for u in assignable]
+
+    if not module_options:
+        st.warning("This project has no modules yet — add one above before approving stories.")
+    if not employee_options:
+        st.warning("No assignable users found — an employee is required before approving stories.")
+
+    epics = (analysis.get("parsed") or {}).get("epics", [])
+
+    st.write("")
+    st.markdown("<div class='req-section-title'>Review & assign</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='req-muted'>Assign a module, employee, priority, and deadline for each story, "
+        "then approve one at a time.</p>",
+        unsafe_allow_html=True,
+    )
+
+    for ei, epic in enumerate(epics):
+        st.markdown(
+            f"<div class='req-epic-title'>Epic: {html.escape(str(epic.get('title') or '—'))}</div>",
+            unsafe_allow_html=True,
+        )
+        for si, story in enumerate(epic.get("stories", [])):
+            created_task_id = story.get("created_task_id")
+            with st.container(border=True):
+                st.markdown(
+                    f"<div class='req-story-title'>{html.escape(str(story.get('title') or '—'))}</div>",
+                    unsafe_allow_html=True,
+                )
+                if story.get("description"):
+                    st.markdown(
+                        f"<span class='req-muted'>{html.escape(str(story.get('description')))}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                if created_task_id:
+                    st.write("")
+                    st.markdown(
+                        _pill_html("Task created", "pill-green"),
+                        unsafe_allow_html=True,
+                    )
+                    continue
+
+                st.write("")
+                f1, f2, f3, f4 = st.columns([1.6, 1.6, 1, 1.2])
+                with f1:
+                    if module_options:
+                        module_label = st.selectbox(
+                            "Module",
+                            [label for label, _ in module_options],
+                            key=f"admin_reqdraft_mod_{analysis_id}_{ei}_{si}",
+                        )
+                        module_id = dict(module_options).get(module_label)
+                    else:
+                        st.selectbox(
+                            "Module",
+                            ["(none available)"],
+                            key=f"admin_reqdraft_mod_disabled_{analysis_id}_{ei}_{si}",
+                            disabled=True,
+                        )
+                        module_id = None
+                with f2:
+                    if employee_options:
+                        employee_label = st.selectbox(
+                            "Employee",
+                            [label for label, _ in employee_options],
+                            key=f"admin_reqdraft_emp_{analysis_id}_{ei}_{si}",
+                        )
+                        assigned_to = dict(employee_options).get(employee_label)
+                    else:
+                        st.selectbox(
+                            "Employee",
+                            ["(none available)"],
+                            key=f"admin_reqdraft_emp_disabled_{analysis_id}_{ei}_{si}",
+                            disabled=True,
+                        )
+                        assigned_to = None
+                with f3:
+                    default_priority = story.get("priority", "medium")
+                    priority_choices = _req_analyzer_priority_options()
+                    priority = st.selectbox(
+                        "Priority",
+                        priority_choices,
+                        index=(
+                            priority_choices.index(default_priority)
+                            if default_priority in priority_choices
+                            else 1
+                        ),
+                        key=f"admin_reqdraft_pri_{analysis_id}_{ei}_{si}",
+                    )
+                with f4:
+                    deadline = st.date_input(
+                        "Deadline",
+                        value=None,
+                        key=f"admin_reqdraft_deadline_{analysis_id}_{ei}_{si}",
+                    )
+
+                st.write("")
+                can_approve = bool(module_id and assigned_to)
+                if st.button(
+                    "Approve & create task",
+                    key=f"admin_reqdraft_approve_{analysis_id}_{ei}_{si}",
+                    type="primary",
+                    disabled=not can_approve,
+                ):
+                    approve_resp = approve_requirement_story(
+                        token,
+                        analysis_id,
+                        epic_index=ei,
+                        story_index=si,
+                        priority=priority,
+                        module_id=module_id,
+                        assigned_to=assigned_to,
+                        deadline=deadline.isoformat() if deadline else None,
+                    )
+                    if approve_resp.status_code in {200, 201}:
+                        st.success("Task created.")
+                        st.rerun()
+                    else:
+                        show_api_error(approve_resp)
+                if not can_approve:
+                    st.caption("Select a Module and an Employee to enable approval.")
+
+    st.write("")
+    with st.container(border=True):
+        st.markdown(
+            "<div class='req-section-title'>Danger zone</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p class='req-muted'>Rejecting discards every remaining unapproved story in this draft. "
+            "Already-created tasks are not deleted.</p>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Reject entire draft", key=f"admin_reqdraft_reject_{analysis_id}"):
+            reject_resp = reject_requirement_analysis(token, analysis_id)
+            if reject_resp.status_code in {200, 204}:
+                st.info("Draft rejected. No further tasks will be created from it.")
+                st.session_state["admin_reqdraft_selected_id"] = None
+                st.rerun()
+            else:
+                show_api_error(reject_resp)
+
+
+def _render_requirement_analyzer(projects, token):
+    """Main Requirement Analyzer page with Analyze and Review Drafts tabs."""
+    _inject_requirement_analyzer_css()
+
+    with st.container(key="admin_req_page_root"):
+        st.title("🧠 Requirement Analyzer")
+        st.markdown(
+            "<p class='req-page-subtitle'>Turn uploaded requirement documents into reviewable "
+            "drafts, then assign modules and employees before creating real tasks.</p>",
+            unsafe_allow_html=True,
+        )
+
+        if REQ_ANALYZER_TAB_KEY not in st.session_state:
+            st.session_state[REQ_ANALYZER_TAB_KEY] = REQ_ANALYZER_TAB_ANALYZE
+
+        active_view = st.segmented_control(
+            "Requirement Analyzer view",
+            options=[REQ_ANALYZER_TAB_ANALYZE, REQ_ANALYZER_TAB_REVIEW],
+            key=REQ_ANALYZER_TAB_KEY,
+            label_visibility="collapsed",
+            required=True,
+            width="content",
+        )
+
+        st.write("")
+
+        if active_view == REQ_ANALYZER_TAB_REVIEW:
+            selected_id = st.session_state.get("admin_reqdraft_selected_id")
+            if selected_id:
+                _render_review_draft_detail(token, selected_id)
+            else:
+                _render_review_drafts_list(projects, token)
+        else:
+            # Leaving the detail view when switching tabs keeps state clean.
+            if st.session_state.get("admin_reqdraft_selected_id"):
+                st.session_state["admin_reqdraft_selected_id"] = None
+            _render_requirement_analyzer_analyze_tab(projects, token)
+
+
 def _render_admin_requirement_analyzer():
-    """Analyze manager-uploaded documents; this page intentionally has no uploader."""
-    st.title("🧠 Requirement Analyzer")
-    st.caption("Analyze an existing project document into epics, user stories, and tasks.")
+    """Render the Requirement Analyzer page — Analyze documents or review pending drafts."""
     token = session_token()
     projects_resp = get_projects(token)
     if projects_resp.status_code != 200:
@@ -1772,70 +2288,9 @@ def _render_admin_requirement_analyzer():
         return
     projects = projects_resp.json()
     if not projects:
-        st.info("No projects found. Create a project and add a requirement document first.")
+        st.info("No projects found. Create a project and upload a requirement document first.")
         return
-    project_by_name = {project["name"]: project for project in projects}
-    selected_name = st.selectbox("Project", list(project_by_name), key="admin_requirement_project")
-    project_id = str(project_by_name[selected_name]["id"])
-    docs_resp = list_documents(token, project_id=project_id)
-    if docs_resp.status_code != 200:
-        show_api_error(docs_resp)
-        return
-    documents = docs_resp.json()
-    if not documents:
-        st.warning("No documents are available for this project yet.")
-        return
-    document_by_label = {f"{doc['filename']} ({str(doc['id'])[:8]})": doc for doc in documents}
-    document_label = st.selectbox("Requirement document", list(document_by_label), key="admin_requirement_document")
-    document_id = str(document_by_label[document_label]["id"])
-    if st.button("Analyze Requirements", key="admin_analyze_requirement", type="primary"):
-        with st.spinner("Analyzing requirement document with AI..."):
-            response = analyze_requirement(token, document_id, project_id)
-        if response.status_code in {200, 201}:
-            st.session_state["admin_requirement_analysis"] = response.json()
-            st.session_state.pop("admin_requirement_edited", None)
-            st.success("Analysis is ready for review.")
-            st.rerun()
-        else:
-            show_api_error(response)
-    analysis = st.session_state.get("admin_requirement_analysis")
-    if not analysis:
-        st.info("Choose an existing document and click Analyze Requirements.")
-        return
-    if analysis.get("status") in {"approved", "rejected"}:
-        st.info(f"This analysis was {analysis['status']}.")
-        return
-    if "admin_requirement_edited" not in st.session_state:
-        st.session_state["admin_requirement_edited"] = analysis.get("breakdown", {}).get("epics", [])
-    edited_epics = st.session_state["admin_requirement_edited"]
-    st.subheader("Review & Edit Epics / Stories")
-    for epic_index, epic in enumerate(edited_epics):
-        with st.container(border=True):
-            epic["title"] = st.text_input(f"Epic {epic_index + 1}", epic.get("title", ""), key=f"admin_requirement_epic_{epic_index}")
-            for story_index, story in enumerate(epic.get("stories", [])):
-                story["title"] = st.text_input(f"Story {epic_index + 1}.{story_index + 1}", story.get("title", ""), key=f"admin_requirement_story_{epic_index}_{story_index}")
-                story["description"] = st.text_area("Description", story.get("description", ""), key=f"admin_requirement_story_desc_{epic_index}_{story_index}")
-                priority = story.get("priority", "medium")
-                story["priority"] = st.selectbox("Priority", ["low", "medium", "high"], index=["low", "medium", "high"].index(priority if priority in {"low", "medium", "high"} else "medium"), key=f"admin_requirement_story_priority_{epic_index}_{story_index}")
-    approve_column, reject_column = st.columns(2)
-    with approve_column:
-        if st.button("Approve & Create Tasks", key="admin_approve_requirement", type="primary"):
-            response = approve_requirement_analysis(token, analysis["id"], edited_epics)
-            if response.status_code in {200, 201}:
-                st.session_state["admin_requirement_analysis"]["status"] = "approved"
-                st.success("Analysis approved and tasks created.")
-                st.rerun()
-            else:
-                show_api_error(response)
-    with reject_column:
-        if st.button("Reject", key="admin_reject_requirement"):
-            response = reject_requirement_analysis(token, analysis["id"])
-            if response.status_code in {200, 204}:
-                st.session_state["admin_requirement_analysis"]["status"] = "rejected"
-                st.info("Analysis rejected. No tasks were created.")
-                st.rerun()
-            else:
-                show_api_error(response)
+    _render_requirement_analyzer(projects, token)
 
 
 def _render_admin_meetings():

@@ -99,7 +99,12 @@ def process_meeting(meeting_id, db: Session) -> None:
         prompt = _build_prompt(transcript)
         try:
             print(f"[process_meeting] call_llm start meeting_id={meeting_id}")
-            llm_response = call_llm(prompt)
+            llm_response = call_llm(
+                prompt,
+                feature="meeting_summarizer",
+                organization_id=meeting.organization_id,
+                user_id=meeting.uploaded_by,
+            )
             print(f"[process_meeting] call_llm complete meeting_id={meeting_id}")
             payload = _parse_llm_json(llm_response)
             validated = MeetingSummaryPayload.model_validate(payload)
@@ -109,7 +114,12 @@ def process_meeting(meeting_id, db: Session) -> None:
             retry_prompt = prompt + "\nReturn valid JSON only, no markdown formatting."
             try:
                 print(f"[process_meeting] retry call_llm start meeting_id={meeting_id}")
-                llm_response = call_llm(retry_prompt)
+                llm_response = call_llm(
+                    retry_prompt,
+                    feature="meeting_summarizer",
+                    organization_id=meeting.organization_id,
+                    user_id=meeting.uploaded_by,
+                )
                 print(f"[process_meeting] retry call_llm complete meeting_id={meeting_id}")
                 payload = _parse_llm_json(llm_response)
                 validated = MeetingSummaryPayload.model_validate(payload)

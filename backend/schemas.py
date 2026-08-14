@@ -99,6 +99,14 @@ class TaskCreate(BaseModel):
     epic: Optional[str] = None
     status: Literal["todo", "in_progress", "testing", "done"] = "todo"
     assigned_to: Optional[uuid.UUID] = None
+    testing_assigned_to: list[str] = []
+    testing_status: Optional[Literal["assigned", "accepted", "submitted"]] = None
+    priority: Literal["low", "medium", "high", "urgent"] = "medium"
+    story_points: Optional[float] = None
+    labels: list[str] = []
+    parent_task_id: Optional[uuid.UUID] = None
+    start_date: Optional[date] = None
+    deadline: Optional[date] = None
 
 
 class TaskUpdate(BaseModel):
@@ -109,10 +117,19 @@ class TaskUpdate(BaseModel):
     epic: Optional[str] = None
     status: Optional[Literal["todo", "in_progress", "testing", "done"]] = None
     assigned_to: Optional[uuid.UUID] = None
+    testing_assigned_to: Optional[list[str]] = None
+    testing_status: Optional[Literal["assigned", "accepted", "submitted"]] = None
+    priority: Optional[Literal["low", "medium", "high", "urgent"]] = None
+    story_points: Optional[float] = None
+    labels: Optional[list[str]] = None
+    parent_task_id: Optional[uuid.UUID] = None
+    start_date: Optional[date] = None
+    deadline: Optional[date] = None
 
 
 class TaskStatusUpdate(BaseModel):
-    status: Literal["todo", "in_progress", "testing", "done"]
+    status: Optional[Literal["todo", "in_progress", "testing", "done"]] = None
+    testing_status: Optional[Literal["assigned", "accepted", "submitted"]] = None
 
 
 class TaskOut(BaseModel):
@@ -126,6 +143,14 @@ class TaskOut(BaseModel):
     status: str
     completed_at: Optional[datetime] = None
     assigned_to: Optional[uuid.UUID] = None
+    testing_assigned_to: list[str] = []
+    testing_status: Optional[str] = None
+    priority: str = "medium"
+    story_points: Optional[float] = None
+    labels: list[str] = []
+    parent_task_id: Optional[uuid.UUID] = None
+    start_date: Optional[date] = None
+    deadline: Optional[date] = None
     created_by: uuid.UUID
     created_at: datetime
 

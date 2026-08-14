@@ -18,8 +18,8 @@ from api_client import (
     upload_document, delete_document,
     get_task, create_subtask, add_comment, add_task_link, remove_task_link,
     generate_weekly_report, get_weekly_reports,
-    analyze_requirement, get_requirement_analysis,
-    approve_requirement_analysis, reject_requirement_analysis,
+    analyze_requirement, get_requirement_analysis, list_requirement_analyses,
+    approve_requirement_story, approve_requirement_analysis, reject_requirement_analysis,
 )
 from views.shared import (
     render_sidebar_header,
@@ -1267,8 +1267,79 @@ def _issue_detail_dialog(token, projects, task_id):
             st.rerun()
  
     _dialog()
- 
- 
+
+
+def _issue_card(t, project_by_id, token=None, employees=None):
+    """One kanban card. Used identically in all four status columns."""
+    proj_name = project_by_id.get(str(t.get("project_id")), "—")
+    key_label = _issue_key(proj_name, t["id"])
+    priority_text, priority_class = _priority_pill(t.get("priority"))
+
+    with st.container(border=True):
+        st.markdown(f"<span class='issue-key'>{key_label}</span>", unsafe_allow_html=True)
+        st.markdown(
+            f"<span class='issue-title'>{html.escape(t.get('title', '—'))}</span>",
+            unsafe_allow_html=True,
+        )
+
+        meta_bits = []
+        if t.get("story_points"):
+            meta_bits.append(f"{t['story_points']} pts")
+        if t.get("deadline"):
+            meta_bits.append(f"due {str(t['deadline'])[:10]}")
+        if meta_bits:
+            st.caption(" · ".join(meta_bits))
+
+        st.markdown(_pill_html(priority_text, priority_class), unsafe_allow_html=True)
+
+        if t.get("labels"):
+            st.markdown(_labels_html(t["labels"]), unsafe_allow_html=True)
+
+        if (t.get("status") or "todo") == "testing":
+            label, glow_class = _testing_glow_meta(t)
+            glow_color = {
+                "testing-anchor-none": "#9CA3AF",
+                "testing-anchor-red": "#EF4444",
+                "testing-anchor-green": "#22C55E",
+            }[glow_class]
+            st.markdown(f"<span class='{glow_class}'></span>", unsafe_allow_html=True)
+            _hex_pill(f"🧪 {label}", glow_color)
+
+            if employees:
+                tester_options = {u.get("id"): _user_option_label(u) for u in employees}
+                current_ids = [str(user_id) for user_id in (t.get("testing_assigned_to") or [])]
+                default_selected = [user_id for user_id in tester_options if str(user_id) in current_ids]
+
+                sel_col, send_col = st.columns([3, 1])
+                with sel_col:
+                    chosen = st.multiselect(
+                        "Testers", list(tester_options.keys()), default=default_selected,
+                        format_func=lambda user_id: tester_options[user_id],
+                        key=f"mgr_testers_select_{t['id']}", label_visibility="collapsed",
+                        placeholder="Assign tester(s)…",
+                    )
+                with send_col:
+                    if st.button("📤", key=f"mgr_testers_send_{t['id']}",
+                                 use_container_width=True, help="Send for testing"):
+                        if not chosen:
+                            st.warning("Select at least one employee.")
+                        else:
+                            resp = update_task(token, t["id"], {
+                                "testing_assigned_to": chosen,
+                                "testing_status": "assigned",
+                            })
+                            if resp.status_code == 200:
+                                st.success("Sent for testing.")
+                                st.rerun()
+                            else:
+                                show_api_error(resp)
+
+        if st.button("Open", key=f"mgr_open_issue_{t['id']}", use_container_width=True):
+            st.session_state["mgr_show_create_issue"] = False
+            st.session_state["mgr_open_issue_id"] = t["id"]
+            st.rerun()
+
+
 def _parse_date_or_none(value):
     """Small helper: turn an ISO date string from the API into a
     `date` object for st.date_input, or None if missing/unparseable."""
@@ -1362,7 +1433,14 @@ def _create_issue_dialog(token, projects, default_project_id):
             with col_e:
                 deadline = st.date_input("Deadline", value=None)
 
-            assignee_label = st.selectbox("Assign to", [label for label, _ in assignee_options])
+            assignee_labels = st.multiselect(
+                "Assign to (select one or more employees)",
+                [label for label, _ in assignee_options if label != "Unassigned"],
+                key="mgr_create_issue_assignees",
+                help="Leave empty to create unassigned issue(s). If you pick more "
+                     "than one person, every task title below is created once "
+                     "per selected person (so everyone gets their own copy).",
+            )
             labels_str = st.text_input("Labels (comma-separated)", placeholder="frontend, bug")
 
             if st.form_submit_button("Create issue(s)", type="primary"):
@@ -1375,27 +1453,33 @@ def _create_issue_dialog(token, projects, default_project_id):
                     st.error("Deadline can't be before the start date.")
                 else:
                     labels_list = [l.strip() for l in labels_str.split(",") if l.strip()]
+                    assignee_id_map = dict(assignee_options)
+                    selected_assignee_ids = [assignee_id_map.get(label) for label in assignee_labels]
+                    # No one picked -> keep old single "Unassigned" behavior.
+                    assignee_ids = selected_assignee_ids or [None]
+
                     created, failures = 0, []
                     for title in titles:
-                        payload = {
-                            "title": title,
-                            "description": description or None,
-                            "epic": epic.strip() or None,
-                            "status": status,
-                            "priority": priority,
-                            "story_points": story_points,
-                            "labels": labels_list,
-                            "project_id": project_id,
-                            "module_id": module_id,
-                            "assigned_to": dict(assignee_options).get(assignee_label),
-                            "start_date": start_date.isoformat() if start_date else None,
-                            "deadline": deadline.isoformat() if deadline else None,
-                        }
-                        resp = create_task(token, payload)
-                        if resp.status_code in {200, 201}:
-                            created += 1
-                        else:
-                            failures.append((title, resp))
+                        for assignee_id in assignee_ids:
+                            payload = {
+                                "title": title,
+                                "description": description or None,
+                                "epic": epic.strip() or None,
+                                "status": status,
+                                "priority": priority,
+                                "story_points": story_points,
+                                "labels": labels_list,
+                                "project_id": project_id,
+                                "module_id": module_id,
+                                "assigned_to": assignee_id,
+                                "start_date": start_date.isoformat() if start_date else None,
+                                "deadline": deadline.isoformat() if deadline else None,
+                            }
+                            resp = create_task(token, payload)
+                            if resp.status_code in {200, 201}:
+                                created += 1
+                            else:
+                                failures.append((title, resp))
 
                     if created:
                         st.success(f"Created {created} issue(s).")
@@ -1412,36 +1496,6 @@ def _create_issue_dialog(token, projects, default_project_id):
             st.rerun()
 
     _dialog()
- 
- 
-def _issue_card(t, project_by_id):
-    """One kanban card. Used identically in all four status columns."""
-    proj_name = project_by_id.get(str(t.get("project_id")), "—")
-    key_label = _issue_key(proj_name, t["id"])
-    priority_text, priority_class = _priority_pill(t.get("priority"))
- 
-    with st.container(border=True):
-        st.markdown(f"<span class='issue-key'>{key_label}</span>", unsafe_allow_html=True)
-        st.markdown(f"<span class='issue-title'>{html.escape(t.get('title','—'))}</span>",
-                    unsafe_allow_html=True)
- 
-        meta_bits = []
-        if t.get("story_points"):
-            meta_bits.append(f"{t['story_points']} pts")
-        if t.get("deadline"):
-            meta_bits.append(f"due {str(t['deadline'])[:10]}")
-        if meta_bits:
-            st.caption(" · ".join(meta_bits))
- 
-        st.markdown(_pill_html(priority_text, priority_class), unsafe_allow_html=True)
- 
-        if t.get("labels"):
-            st.markdown(_labels_html(t["labels"]), unsafe_allow_html=True)
- 
-        if st.button("Open", key=f"mgr_open_issue_{t['id']}", use_container_width=True):
-            st.session_state["mgr_show_create_issue"] = False
-            st.session_state["mgr_open_issue_id"] = t["id"]
-            st.rerun()
 
 
 def _completed_at(task):
@@ -1480,27 +1534,38 @@ def _render_manager_tasks(projects, token):
     project_by_id = {str(p["id"]): p["name"] for p in projects}
  
     # ---- Toolbar: search + filters + create ----
+    # Three filter controls, each with a short caption above it so it's
+    # always clear what it filters on:
+    #   1) Search box   -> filters issues whose TITLE contains the text
+    #   2) Status filter -> filters issues by their STATUS (To Do / In
+    #      Progress / Testing / Done) — pick one or more
+    #   3) Priority filter -> filters issues by their PRIORITY (Low /
+    #      Medium / High / Urgent) — pick one or more
     toolbar_search, toolbar_status, toolbar_priority, toolbar_create = st.columns([2.4, 1.2, 1.2, 1])
     with toolbar_search:
+        st.caption("🔍 Search by title")
         search_query = st.text_input(
-            "🔍 Search issues", key="mgr_task_search", placeholder="Search by title…",
+            "🔍 Search issues", key="mgr_task_search", placeholder="Type part of a title…",
             label_visibility="collapsed",
         )
     with toolbar_status:
+        st.caption("Filter by status")
         status_filter = st.multiselect(
             "Status", list(STATUS_META.keys()),
             format_func=lambda k: STATUS_META[k]["label"],
-            key="mgr_task_status_filter", placeholder="Status",
+            key="mgr_task_status_filter", placeholder="Any status",
             label_visibility="collapsed",
         )
     with toolbar_priority:
+        st.caption("Filter by priority")
         priority_filter = st.multiselect(
             "Priority", PRIORITY_OPTIONS,
             format_func=lambda p: PRIORITY_META[p]["label"],
-            key="mgr_task_priority_filter", placeholder="Priority",
+            key="mgr_task_priority_filter", placeholder="Any priority",
             label_visibility="collapsed",
         )
     with toolbar_create:
+        st.caption("​")  # keeps the button aligned with the other 3 boxes
         if st.button("➕ Create issue", type="primary", use_container_width=True, key="mgr_create_issue_btn"):
             st.session_state["mgr_open_issue_id"] = None
             st.session_state["mgr_show_create_issue"] = True
@@ -1536,6 +1601,9 @@ def _render_manager_tasks(projects, token):
     elif not filtered:
         st.info("No issues match your filters.")
     else:
+        _inject_testing_glow_css()
+        _mgr_users, _mgr_users_ok = _fetch_users_safely(token)
+        _, _mgr_testable_employees = _split_staff(_mgr_users)
         board_cols = st.columns(len(status_keys))
         for col, status_key in zip(board_cols, status_keys):
             with col:
@@ -1545,7 +1613,7 @@ def _render_manager_tasks(projects, token):
                 if not col_tasks:
                     st.caption("No issues here.")
                 for t in col_tasks:
-                    _issue_card(t, project_by_id)
+                    _issue_card(t, project_by_id, token=token, employees=_mgr_testable_employees)
 
     # Completed tasks are retained with their full Jira details. Selecting a
     # project here keeps the archive independent from the active board view.
@@ -1735,6 +1803,36 @@ def _hex_pill(text, color):
     )
 
 
+def _testing_glow_meta(task):
+    """(label, glow_class) for the testing-assignment glow on a kanban card
+    while the task's status == 'testing'."""
+    testers = task.get("testing_assigned_to") or []
+    t_status = str(task.get("testing_status") or "").strip().lower()
+    if not testers:
+        return "No assign", "testing-anchor-none"
+    if t_status == "submitted":
+        return "Testing done", "testing-anchor-green"
+    return "Testing", "testing-anchor-red"
+
+
+def _inject_testing_glow_css():
+    st.markdown(
+        """
+        <style>
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.testing-anchor-red) {
+            border: 1.5px solid #EF4444 !important;
+            box-shadow: 0 0 0 3px rgba(239,68,68,0.18) !important;
+        }
+        div[data-testid='stVerticalBlockBorderWrapper']:has(.testing-anchor-green) {
+            border: 1.5px solid #22C55E !important;
+            box-shadow: 0 0 0 3px rgba(34,197,94,0.18) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _color_dot(color):
     return (
         f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
@@ -1877,6 +1975,25 @@ def _render_module_flow_card(token, project_id, module, module_tasks=None):
                 "<div style='font-size:0.8rem;color:#9CA3AF;margin-bottom:6px;'>No tasks yet</div>",
                 unsafe_allow_html=True,
             )
+
+        # ---- Testing status rollup for this module's tasks ----
+        testing_tasks = [t for t in module_tasks if t.get("testing_assigned_to")]
+        if testing_tasks:
+            all_submitted = all(t.get("testing_status") == "submitted" for t in testing_tasks)
+            if all_submitted:
+                st.markdown(
+                    "<div style='font-size:0.72rem;font-weight:700;color:#15803D;"
+                    "background:#DCFCE7;border-radius:6px;padding:2px 8px;"
+                    "display:inline-block;margin-bottom:6px;'>🧪 Testing: Done</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<div style='font-size:0.72rem;font-weight:700;color:#B91C1C;"
+                    "background:#FEE2E2;border-radius:6px;padding:2px 8px;"
+                    "display:inline-block;margin-bottom:6px;'>🧪 Testing: In Progress</div>",
+                    unsafe_allow_html=True,
+                )
 
         st.write("")
 
@@ -2808,159 +2925,502 @@ def _render_weekly_reports(projects, token):
 
 
 # --------------------------------------------------------------------------
-# REQUIREMENT ANALYZER — AI Epics/Stories/Tasks breakdown with human review
+# REQUIREMENT ANALYZER — Analyze (creates draft) + Review Drafts (assign
+# Module/Employee/Priority/Deadline per story, approve one at a time)
 # --------------------------------------------------------------------------
-def _render_requirement_analyzer(projects, token):
-    st.title("🧠 Requirement Analyzer")
-    st.caption(
-        "Select an uploaded requirement document and let AI break it into "
-        "Epics → User Stories → Tasks. Review & edit the result, then click "
-        "Approve to create real tasks (nothing is created until you approve)."
+REQ_ANALYZER_TAB_ANALYZE = "Analyze Document"
+REQ_ANALYZER_TAB_REVIEW = "Review Drafts"
+REQ_ANALYZER_TAB_KEY = "mgr_req_analyzer_view"
+
+
+def _req_analyzer_priority_options():
+    return ["low", "medium", "high"]
+
+
+def _inject_requirement_analyzer_css():
+    """Page-scoped polish for the Requirement Analyzer — matches the
+    manager violet theme (#4F46E5) already used app-wide."""
+    st.markdown(
+        """
+        <style>
+        /* Segmented pill toggle (Analyze / Review Drafts) */
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] > div {
+            background: #F3F4F6 !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 999px !important;
+            padding: 4px !important;
+            gap: 4px !important;
+            box-shadow: inset 0 1px 2px rgba(16,24,40,0.04);
+        }
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label {
+            border-radius: 999px !important;
+            border: none !important;
+            padding: 8px 18px !important;
+            font-weight: 600 !important;
+            color: #6B7280 !important;
+            background: transparent !important;
+            transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+        }
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label:hover {
+            background: #FFFFFF !important;
+            color: #4338CA !important;
+        }
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label[data-checked="true"],
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label:has(input:checked) {
+            background: #4F46E5 !important;
+            color: #FFFFFF !important;
+            box-shadow: 0 1px 3px rgba(79,70,229,0.35);
+        }
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label[data-checked="true"] *,
+        .st-key-mgr_req_analyzer_view [data-testid="stSegmentedControl"] label:has(input:checked) * {
+            color: #FFFFFF !important;
+        }
+
+        /* Section / story cards on this page */
+        .st-key-mgr_req_page_root div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: #FFFFFF !important;
+            border: 1px solid #EEF0F3 !important;
+            border-radius: 14px !important;
+            box-shadow: 0 1px 3px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04) !important;
+            padding: 0.55rem 0.65rem !important;
+        }
+
+        /* Typography helpers used only on this page */
+        .req-page-subtitle {
+            color: #6B7280 !important;
+            font-size: 0.95rem;
+            line-height: 1.45;
+            margin: 0 0 1rem 0;
+        }
+        .req-section-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #111827 !important;
+            margin: 0 0 0.25rem 0;
+        }
+        .req-muted {
+            color: #6B7280 !important;
+            font-size: 0.85rem;
+        }
+        .req-epic-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #312E81 !important;
+            margin: 1rem 0 0.5rem 0;
+            padding-bottom: 0.35rem;
+            border-bottom: 1px solid #EEF2FF;
+        }
+        .req-story-title {
+            font-size: 0.98rem;
+            font-weight: 650;
+            color: #111827 !important;
+            margin-bottom: 0.15rem;
+        }
+        .req-draft-meta {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            color: #6B7280;
+            font-size: 0.82rem;
+            margin-top: 0.25rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    st.write("")
 
-    if not projects:
-        st.info("No projects found. Create a project and upload a requirement document first.")
-        return
 
-    project_labels = [p["name"] for p in projects]
-    project_label = st.selectbox(
-        "Project", project_labels, key="mgr_req_project_select"
-    )
-    selected_project = next(
-        (p for p in projects if p["name"] == project_label), None
-    )
-    if not selected_project:
-        return
-    project_id = str(selected_project["id"])
+def _render_requirement_analyzer_analyze_tab(projects, token):
+    """Step 1: pick a doc, run AI analysis -> saves as pending_review DRAFT only.
+    Nothing appears anywhere else until it's approved in Review Drafts."""
+    with st.container(border=True):
+        st.markdown("<div class='req-section-title'>Analyze a requirement document</div>", unsafe_allow_html=True)
 
-    docs_resp = list_documents(token, project_id=project_id)
-    if docs_resp.status_code != 200:
-        show_api_error(docs_resp)
-        return
-    documents = docs_resp.json()
+        if not projects:
+            st.info("No projects found. Create a project and upload a requirement document first.")
+            return
 
-    if not documents:
-        st.warning("No documents uploaded for this project yet. Upload a requirement file first.")
-        return
+        project_labels = [p["name"] for p in projects]
+        project_label = st.selectbox("Project", project_labels, key="mgr_req_project_select")
+        selected_project = next((p for p in projects if p["name"] == project_label), None)
+        if not selected_project:
+            return
+        project_id = str(selected_project["id"])
 
-    doc_labels = {d["filename"]: d for d in documents}
-    doc_label = st.selectbox(
-        "Requirement document", list(doc_labels.keys()), key="mgr_req_doc_select"
-    )
-    selected_doc = doc_labels[doc_label]
-    document_id = str(selected_doc["id"])
+        docs_resp = list_documents(token, project_id=project_id)
+        if docs_resp.status_code != 200:
+            show_api_error(docs_resp)
+            return
+        documents = docs_resp.json()
 
-    if st.button("Analyze", key="mgr_req_analyze", type="primary"):
-        with st.spinner("Analyzing requirement document with AI..."):
-            resp = analyze_requirement(token, document_id, project_id)
-        if resp.status_code in {200, 201}:
-            data = resp.json()
-            st.session_state["mgr_req_analysis"] = data
-            st.success(f"Analysis ready (id: {data['id']}). Review it below.")
-            st.rerun()
-        else:
-            show_api_error(resp)
+        if not documents:
+            st.warning("No documents uploaded for this project yet. Upload a requirement file first.")
+            return
 
-    analysis = st.session_state.get("mgr_req_analysis")
-    if not analysis:
-        st.info("Click 'Analyze' to generate a structured breakdown.")
-        return
+        doc_labels = {d["filename"]: d for d in documents}
+        doc_label = st.selectbox(
+            "Requirement document", list(doc_labels.keys()), key="mgr_req_doc_select"
+        )
+        selected_doc = doc_labels[doc_label]
+        document_id = str(selected_doc["id"])
 
-    if analysis.get("status") == "approved":
-        st.success("This analysis has already been approved and tasks were created.")
-        return
-    if analysis.get("status") == "rejected":
-        st.info("This analysis was rejected. No tasks were created.")
-        return
-
-    epics = analysis.get("breakdown", {}).get("epics", [])
-
-    st.divider()
-    st.subheader("Review & Edit Epics / Stories")
-
-    if "mgr_req_edited" not in st.session_state:
-        st.session_state["mgr_req_edited"] = epics
-
-    edited = st.session_state["mgr_req_edited"]
-
-    epic_to_delete = None
-    story_deletes = {}
-    for ei, epic in enumerate(list(edited)):
-        with st.container(border=True):
-            col_t, col_d = st.columns([5, 1])
-            with col_t:
-                epic["title"] = st.text_input(
-                    f"Epic {ei + 1} title", value=epic.get("title", ""),
-                    key=f"mgr_req_epic_title_{ei}",
-                )
-            with col_d:
-                if st.button("🗑️ Delete epic", key=f"mgr_req_del_epic_{ei}"):
-                    epic_to_delete = ei
-
-            for si, story in enumerate(list(epic.get("stories", []))):
-                with st.container(border=True):
-                    st.markdown(f"**Story {si + 1}**")
-                    story["title"] = st.text_input(
-                        "Title", value=story.get("title", ""),
-                        key=f"mgr_req_story_title_{ei}_{si}",
-                    )
-                    story["description"] = st.text_area(
-                        "Description", value=story.get("description", ""),
-                        key=f"mgr_req_story_desc_{ei}_{si}",
-                    )
-                    priority = story.get("priority", "medium")
-                    if priority not in ("low", "medium", "high"):
-                        priority = "medium"
-                    story["priority"] = st.selectbox(
-                        "Priority", ["low", "medium", "high"],
-                        index=["low", "medium", "high"].index(priority),
-                        key=f"mgr_req_story_pri_{ei}_{si}",
-                    )
-                    if st.button(
-                        "🗑️ Delete story", key=f"mgr_req_del_story_{ei}_{si}"
-                    ):
-                        story_deletes[(ei, si)] = True
-
-    if epic_to_delete is not None:
-        del edited[epic_to_delete]
-        st.rerun()
-
-    if story_deletes:
-        for (ei, si) in list(story_deletes.keys()):
-            if ei < len(edited):
-                stories = edited[ei].get("stories", [])
-                if si < len(stories):
-                    del stories[si]
-        st.rerun()
-
-    st.divider()
-
-    col_app, col_rej = st.columns(2)
-    with col_app:
-        if st.button("✅ Approve & Create Tasks", key="mgr_req_approve", type="primary"):
-            with st.spinner("Creating tasks via project task logic..."):
-                resp = approve_requirement_analysis(token, analysis["id"], edited)
+        st.write("")
+        if st.button("Analyze document", key="mgr_req_analyze", type="primary"):
+            with st.spinner("Analyzing requirement document with AI..."):
+                resp = analyze_requirement(token, document_id, project_id)
             if resp.status_code in {200, 201}:
                 data = resp.json()
-                task_ids = data.get("task_ids", [])
+                st.session_state[REQ_ANALYZER_TAB_KEY] = REQ_ANALYZER_TAB_REVIEW
+                st.session_state["mgr_reqdraft_selected_id"] = str(data["id"])
                 st.success(
-                    f"Approved! Created {len(task_ids)} task(s). "
-                    f"Task IDs: {', '.join(str(t) for t in task_ids[:5])}"
+                    f"Draft ready (id: {data['id']}). Assign a Module and Employee, "
+                    "then approve stories into real tasks."
                 )
-                st.session_state["mgr_req_analysis"]["status"] = "approved"
                 st.rerun()
             else:
                 show_api_error(resp)
-    with col_rej:
-        if st.button("❌ Reject", key="mgr_req_reject"):
-            resp = reject_requirement_analysis(token, analysis["id"])
-            if resp.status_code in {200, 204}:
-                st.info("Analysis rejected. No tasks were created.")
-                st.session_state["mgr_req_analysis"]["status"] = "rejected"
+
+
+def _render_review_drafts_list(projects, token):
+    """List all pending_review draft analyses. Manager clicks one to open it."""
+    with st.container(border=True):
+        st.markdown("<div class='req-section-title'>Pending drafts</div>", unsafe_allow_html=True)
+
+        project_names = [p["name"] for p in projects]
+        filter_label = st.selectbox(
+            "Filter by project",
+            [ALL_PROJECTS_LABEL] + project_names,
+            key="mgr_reqdraft_project_filter",
+        )
+        filter_project_id = None
+        if filter_label != ALL_PROJECTS_LABEL:
+            matching = next((p for p in projects if p["name"] == filter_label), None)
+            filter_project_id = str(matching["id"]) if matching else None
+
+    resp = list_requirement_analyses(
+        token, status="pending_review", project_id=filter_project_id
+    )
+    if resp.status_code != 200:
+        show_api_error(resp)
+        return
+    drafts = resp.json()
+
+    st.write("")
+    if not drafts:
+        st.info("No pending drafts. Run an analysis from the Analyze Document view.")
+        return
+
+    for d in drafts:
+        with st.container(border=True):
+            row = st.columns([3.2, 1.2, 1.2, 1.3, 1])
+            with row[0]:
+                st.markdown(
+                    f"<div class='req-story-title'>{html.escape(str(d.get('document_filename') or 'Untitled document'))}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<span class='req-muted'>{html.escape(str(d.get('project_name') or 'No project'))}</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[1]:
+                st.markdown(
+                    f"<span class='req-muted'>📦 {d.get('epic_count', 0)} epics</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[2]:
+                st.markdown(
+                    f"<span class='req-muted'>📝 {d.get('story_count', 0)} stories</span>",
+                    unsafe_allow_html=True,
+                )
+            with row[3]:
+                pending_n = d.get("pending_story_count", 0)
+                if pending_n:
+                    st.markdown(
+                        _pill_html(f"{pending_n} pending", "pill-orange"),
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        _pill_html("all created", "pill-green"),
+                        unsafe_allow_html=True,
+                    )
+            with row[4]:
+                if st.button(
+                    "Open",
+                    key=f"mgr_reqdraft_open_{d['id']}",
+                    width="stretch",
+                ):
+                    st.session_state["mgr_reqdraft_selected_id"] = str(d["id"])
+                    st.rerun()
+
+
+def _render_review_draft_detail(token, analysis_id):
+    """Open one draft: assign Module + Employee + Priority + Deadline per
+    story, then 'Approve & Create Task' calls the EXISTING create_task path
+    (via approve-story) for that one story only."""
+    resp = get_requirement_analysis(token, analysis_id)
+    if resp.status_code != 200:
+        show_api_error(resp)
+        if st.button("Back to Review Drafts", key="mgr_reqdraft_back_err"):
+            st.session_state["mgr_reqdraft_selected_id"] = None
+            st.rerun()
+        return
+    analysis = resp.json()
+
+    with st.container(border=True):
+        top_l, top_r = st.columns([4, 1])
+        with top_l:
+            st.markdown(
+                f"<div class='req-section-title'>{html.escape(str(analysis.get('document_filename') or 'Draft'))}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<span class='req-muted'>Project: {html.escape(str(analysis.get('project_name') or '—'))} · "
+                f"Status: {html.escape(str(analysis.get('status') or '—'))}</span>",
+                unsafe_allow_html=True,
+            )
+        with top_r:
+            if st.button("Back", key="mgr_reqdraft_back", width="stretch"):
+                st.session_state["mgr_reqdraft_selected_id"] = None
+                st.rerun()
+
+    if analysis.get("status") == "rejected":
+        st.info("This draft was rejected. No tasks were created.")
+        return
+
+    project_id = analysis.get("project_id")
+    if not project_id:
+        st.error("This draft has no linked project, so tasks can't be created from it.")
+        return
+    project_id = str(project_id)
+
+    # Existing modules for this project only — no separate module system.
+    modules = _get_project_modules(token, project_id)
+    module_options = [(f"{m.get('icon', '🧩')} {m['name']}", str(m["id"])) for m in modules]
+
+    st.write("")
+    with st.expander("Create a new module for this project", expanded=False):
+        with st.form(f"mgr_reqdraft_new_module_{analysis_id}", clear_on_submit=True):
+            nm_col1, nm_col2 = st.columns([3, 1.4])
+            with nm_col1:
+                new_mod_name = st.text_input(
+                    "Module name", placeholder="e.g. Authentication"
+                )
+            with nm_col2:
+                new_mod_icon = st.selectbox(
+                    "Icon",
+                    MODULE_ICON_OPTIONS,
+                    key=f"mgr_reqdraft_mod_icon_{analysis_id}",
+                )
+            new_mod_description = st.text_area(
+                "Description",
+                placeholder="Brief description of this module",
+                height=90,
+                key=f"mgr_reqdraft_mod_desc_{analysis_id}",
+            )
+            if st.form_submit_button("Add module", type="primary"):
+                if not new_mod_name.strip():
+                    st.error("Module name is required.")
+                else:
+                    create_resp = create_project_module(
+                        token,
+                        project_id,
+                        {
+                            "name": new_mod_name.strip(),
+                            "icon": new_mod_icon,
+                            "status": "locked",
+                            "description": new_mod_description.strip() or None,
+                        },
+                    )
+                    if create_resp.status_code == 201:
+                        st.success(f"Module '{new_mod_name.strip()}' created.")
+                        st.rerun()
+                    else:
+                        show_api_error(create_resp)
+
+    users, _users_ok = _fetch_users_safely(token)
+    managers, employees = _split_staff(users)
+    assignable = managers + employees
+    employee_options = [(_user_option_label(u), str(u.get("id"))) for u in assignable]
+
+    if not module_options:
+        st.warning("This project has no modules yet — add one above before approving stories.")
+    if not employee_options:
+        st.warning("No assignable users found — an employee is required before approving stories.")
+
+    epics = (analysis.get("parsed") or {}).get("epics", [])
+
+    st.write("")
+    st.markdown("<div class='req-section-title'>Review & assign</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='req-muted'>Assign a module, employee, priority, and deadline for each story, "
+        "then approve one at a time.</p>",
+        unsafe_allow_html=True,
+    )
+
+    for ei, epic in enumerate(epics):
+        st.markdown(
+            f"<div class='req-epic-title'>Epic: {html.escape(str(epic.get('title') or '—'))}</div>",
+            unsafe_allow_html=True,
+        )
+        for si, story in enumerate(epic.get("stories", [])):
+            created_task_id = story.get("created_task_id")
+            with st.container(border=True):
+                st.markdown(
+                    f"<div class='req-story-title'>{html.escape(str(story.get('title') or '—'))}</div>",
+                    unsafe_allow_html=True,
+                )
+                if story.get("description"):
+                    st.markdown(
+                        f"<span class='req-muted'>{html.escape(str(story.get('description')))}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                if created_task_id:
+                    st.write("")
+                    st.markdown(
+                        _pill_html("Task created", "pill-green"),
+                        unsafe_allow_html=True,
+                    )
+                    continue
+
+                st.write("")
+                f1, f2, f3, f4 = st.columns([1.6, 1.6, 1, 1.2])
+                with f1:
+                    if module_options:
+                        module_label = st.selectbox(
+                            "Module",
+                            [label for label, _ in module_options],
+                            key=f"mgr_reqdraft_mod_{analysis_id}_{ei}_{si}",
+                        )
+                        module_id = dict(module_options).get(module_label)
+                    else:
+                        st.selectbox(
+                            "Module",
+                            ["(none available)"],
+                            key=f"mgr_reqdraft_mod_disabled_{analysis_id}_{ei}_{si}",
+                            disabled=True,
+                        )
+                        module_id = None
+                with f2:
+                    if employee_options:
+                        employee_label = st.selectbox(
+                            "Employee",
+                            [label for label, _ in employee_options],
+                            key=f"mgr_reqdraft_emp_{analysis_id}_{ei}_{si}",
+                        )
+                        assigned_to = dict(employee_options).get(employee_label)
+                    else:
+                        st.selectbox(
+                            "Employee",
+                            ["(none available)"],
+                            key=f"mgr_reqdraft_emp_disabled_{analysis_id}_{ei}_{si}",
+                            disabled=True,
+                        )
+                        assigned_to = None
+                with f3:
+                    default_priority = story.get("priority", "medium")
+                    priority_choices = _req_analyzer_priority_options()
+                    priority = st.selectbox(
+                        "Priority",
+                        priority_choices,
+                        index=(
+                            priority_choices.index(default_priority)
+                            if default_priority in priority_choices
+                            else 1
+                        ),
+                        key=f"mgr_reqdraft_pri_{analysis_id}_{ei}_{si}",
+                    )
+                with f4:
+                    deadline = st.date_input(
+                        "Deadline",
+                        value=None,
+                        key=f"mgr_reqdraft_deadline_{analysis_id}_{ei}_{si}",
+                    )
+
+                st.write("")
+                can_approve = bool(module_id and assigned_to)
+                if st.button(
+                    "Approve & create task",
+                    key=f"mgr_reqdraft_approve_{analysis_id}_{ei}_{si}",
+                    type="primary",
+                    disabled=not can_approve,
+                ):
+                    approve_resp = approve_requirement_story(
+                        token,
+                        analysis_id,
+                        epic_index=ei,
+                        story_index=si,
+                        priority=priority,
+                        module_id=module_id,
+                        assigned_to=assigned_to,
+                        deadline=deadline.isoformat() if deadline else None,
+                    )
+                    if approve_resp.status_code in {200, 201}:
+                        st.success("Task created.")
+                        st.rerun()
+                    else:
+                        show_api_error(approve_resp)
+                if not can_approve:
+                    st.caption("Select a Module and an Employee to enable approval.")
+
+    st.write("")
+    with st.container(border=True):
+        st.markdown(
+            "<div class='req-section-title'>Danger zone</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p class='req-muted'>Rejecting discards every remaining unapproved story in this draft. "
+            "Already-created tasks are not deleted.</p>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Reject entire draft", key=f"mgr_reqdraft_reject_{analysis_id}"):
+            reject_resp = reject_requirement_analysis(token, analysis_id)
+            if reject_resp.status_code in {200, 204}:
+                st.info("Draft rejected. No further tasks will be created from it.")
+                st.session_state["mgr_reqdraft_selected_id"] = None
                 st.rerun()
             else:
-                show_api_error(resp)
+                show_api_error(reject_resp)
+
+
+def _render_requirement_analyzer(projects, token):
+    _inject_requirement_analyzer_css()
+
+    with st.container(key="mgr_req_page_root"):
+        st.title("Requirement Analyzer")
+        st.markdown(
+            "<p class='req-page-subtitle'>Turn uploaded requirement documents into reviewable "
+            "drafts, then assign modules and employees before creating real tasks.</p>",
+            unsafe_allow_html=True,
+        )
+
+        if REQ_ANALYZER_TAB_KEY not in st.session_state:
+            st.session_state[REQ_ANALYZER_TAB_KEY] = REQ_ANALYZER_TAB_ANALYZE
+
+        active_view = st.segmented_control(
+            "Requirement Analyzer view",
+            options=[REQ_ANALYZER_TAB_ANALYZE, REQ_ANALYZER_TAB_REVIEW],
+            key=REQ_ANALYZER_TAB_KEY,
+            label_visibility="collapsed",
+            required=True,
+            width="content",
+        )
+
+        st.write("")
+
+        if active_view == REQ_ANALYZER_TAB_REVIEW:
+            selected_id = st.session_state.get("mgr_reqdraft_selected_id")
+            if selected_id:
+                _render_review_draft_detail(token, selected_id)
+            else:
+                _render_review_drafts_list(projects, token)
+        else:
+            # Leaving the detail view when switching tabs keeps state clean.
+            if st.session_state.get("mgr_reqdraft_selected_id"):
+                st.session_state["mgr_reqdraft_selected_id"] = None
+            _render_requirement_analyzer_analyze_tab(projects, token)
 
 
 # --------------------------------------------------------------------------

@@ -146,6 +146,10 @@ def _deadline_pill(days):
     return "On track", "pill-green"
 
 
+def _is_completed(dashboard):
+    return (dashboard.get("status") or "").strip().lower() == "completed"
+
+
 def _card_anchor(name):
     st.markdown(
         "<span class='card-anchor card-anchor-" + name + "'></span>",
@@ -384,18 +388,30 @@ def _deadline_urgency_chart(dashboards):
     days_values = []
     for d in dashboards:
         days = _days_left(d.get("deadline"))
-        days_values.append(days if days is not None else 0)
+        days = days if days is not None else 0
+        if _is_completed(d) and days < 0:
+            days = 0
+        days_values.append(days)
 
     colors = []
-    for days in days_values:
-        if days < 0:
+    for d, days in zip(dashboards, days_values):
+        if _is_completed(d):
+            colors.append(CHART_COLORS["green"])
+        elif days < 0:
             colors.append(CHART_COLORS["red"])
         elif days <= 7:
             colors.append(CHART_COLORS["amber"])
         else:
             colors.append(CHART_COLORS["green"])
 
-    labels = [(f"{d}d overdue" if d < 0 else f"{d}d left") for d in days_values]
+    labels = []
+    for d, days in zip(dashboards, days_values):
+        if _is_completed(d):
+            labels.append("Completed")
+        elif days < 0:
+            labels.append(f"{days}d overdue")
+        else:
+            labels.append(f"{days}d left")
 
     fig = go.Figure(go.Bar(
         x=names, y=days_values, orientation="v",
@@ -665,25 +681,19 @@ def _render_client_dashboard():
             st.markdown(_pill_html(status_label, "pill-blue"), unsafe_allow_html=True)
             st.markdown("### " + hero["project_name"])
 
+            hero_completed = _is_completed(hero)
+
             deadline_line = "<div class='meta-row'>📅 Deadline &nbsp; <b>" + str(hero.get("deadline", "—")) + "</b>"
-            if hero_days is not None:
+            if hero_days is not None and not hero_completed:
                 deadline_line += " &nbsp;·&nbsp; " + str(hero_days) + " day(s) remaining"
             deadline_line += "</div>"
             st.markdown(deadline_line, unsafe_allow_html=True)
 
-            if hero.get("milestone_info"):
-                st.markdown(
-                    "<div class='meta-row'>🎯 Current Milestone &nbsp; <b>" + hero["milestone_info"] + "</b></div>",
-                    unsafe_allow_html=True,
-                )
-            if hero.get("module_count"):
-                st.caption(
-                    "Workflow progress: " + str(hero["completed_module_count"]) + "/"
-                    + str(hero["module_count"]) + " modules complete"
-                )
-
-            pill_text, pill_cls = _deadline_pill(hero_days)
-            st.markdown(_pill_html(pill_text, pill_cls), unsafe_allow_html=True)
+            if hero_completed:
+                st.markdown(_pill_html("✅ Completed on schedule" if (hero_days or 0) >= 0 else "✅ Completed", "pill-green"), unsafe_allow_html=True)
+            else:
+                pill_text, pill_cls = _deadline_pill(hero_days)
+                st.markdown(_pill_html(pill_text, pill_cls), unsafe_allow_html=True)
 
         hero_docs = hero.get("documents") or []
         with st.expander("📄 Documents (" + str(len(hero_docs)) + ")"):
@@ -692,9 +702,6 @@ def _render_client_dashboard():
             elif not using_demo:
                 for doc in hero_docs:
                     _render_doc_row(token, doc, key_prefix="hero_" + str(hero["project_id"]), can_delete=False)
-
-        if not using_demo:
-            _render_project_modules(token, hero["project_id"], "hero_" + str(hero["project_id"]))
 
     st.write("")
 
@@ -719,29 +726,29 @@ def _render_client_dashboard():
                     status_label = meta["icon"] + " " + dashboard["status"].replace("_", " ").title()
                     st.markdown(_pill_html(status_label, "pill-blue"), unsafe_allow_html=True)
 
+                project_completed = _is_completed(dashboard)
+
                 dl_col, dr_col, pr_col = st.columns(3)
                 with dl_col:
                     st.caption("DEADLINE")
                     st.markdown("**" + str(dashboard.get("deadline", "—")) + "**")
                 with dr_col:
                     st.caption("DAYS REMAINING")
-                    st.markdown(("**" + str(days_left) + " day(s)**") if days_left is not None else "**—**")
+                    if project_completed:
+                        st.markdown("**—**")
+                    else:
+                        st.markdown(("**" + str(days_left) + " day(s)**") if days_left is not None else "**—**")
                 with pr_col:
                     st.caption("PROGRESS")
                     st.markdown("**" + str(progress) + "%**")
 
-                pill_text, pill_cls = _deadline_pill(days_left)
-                st.markdown(_pill_html(pill_text, pill_cls), unsafe_allow_html=True)
+                if project_completed:
+                    st.markdown(_pill_html("✅ Completed", "pill-green"), unsafe_allow_html=True)
+                else:
+                    pill_text, pill_cls = _deadline_pill(days_left)
+                    st.markdown(_pill_html(pill_text, pill_cls), unsafe_allow_html=True)
                 st.write("")
                 st.progress(progress / 100)
-
-                if dashboard.get("milestone_info"):
-                    st.caption(dashboard["milestone_info"])
-                if dashboard.get("module_count"):
-                    st.caption(
-                        "Workflow: " + str(dashboard["completed_module_count"]) + "/"
-                        + str(dashboard["module_count"]) + " modules complete"
-                    )
 
                 documents = dashboard.get("documents") or []
                 with st.expander("📄 Documents (" + str(len(documents)) + ")"):
@@ -754,9 +761,6 @@ def _render_client_dashboard():
                                 key_prefix="dash_" + str(dashboard["project_id"]),
                                 can_delete=False,
                             )
-                _render_project_modules(
-                    token, dashboard["project_id"], "dash_" + str(dashboard["project_id"])
-                )
             st.write("")
 
     _section_heading("📊", "Analytics")
