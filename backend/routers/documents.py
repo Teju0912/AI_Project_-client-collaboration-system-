@@ -686,6 +686,89 @@ def download_document(
 
 
 # ============================================================
+# PREVIEW DOCUMENT (returns a temporary signed URL)
+#
+# We CANNOT let the frontend put the /download URL directly
+# into an <img>/<iframe> src, because:
+#   1) /download requires an Authorization header, which
+#      <img>/<iframe> tags cannot send.
+#   2) /download forces "attachment" disposition, which tells
+#      the browser to download the file instead of rendering it.
+#   3) Frontend (Streamlit Cloud) and backend (Render) are on
+#      different domains in production, so cookies/auth don't
+#      carry over the way they might locally.
+#
+# This endpoint is called normally (with auth, like any other
+# API call) and returns a short-lived Supabase "signed URL".
+# That signed URL already contains its own access token, so it
+# can be used directly as an <img>/<iframe> src with no auth
+# headers needed — and it will render inline, not download.
+# ============================================================
+
+@router.get("/{document_id}/preview-url")
+def get_document_preview_url(
+    document_id: UUID,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    document = (
+        db.query(models.Document)
+        .filter(
+            models.Document.id == document_id
+        )
+        .first()
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found",
+        )
+
+    _assert_can_access_document(
+        db,
+        current_user,
+        document,
+    )
+
+    try:
+
+        signed = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(
+            document.storage_path,
+            300,  # URL valid for 5 minutes
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate preview URL: {exc}",
+        )
+
+    signed_url = (
+        signed.get("signedURL")
+        or signed.get("signed_url")
+        or signed.get("signedUrl")
+    )
+
+    if not signed_url:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate a signed preview URL",
+        )
+
+    # Supabase sometimes returns a relative path — make it absolute.
+    if signed_url.startswith("/"):
+        signed_url = f"{SUPABASE_URL}{signed_url}"
+
+    return {
+        "url": signed_url,
+        "filename": document.filename,
+    }
+
+
+# ============================================================
 # REINDEX DOCUMENT
 # ============================================================
 

@@ -23,7 +23,6 @@ from api_client import (
 )
 from views.shared import (
     render_sidebar_header,
-    render_sidebar_logout,
     show_api_error,
     show_document_preview,
     session_token,
@@ -390,16 +389,61 @@ def _icon_badge(icon, bg, fg="#111827"):
     )
 
 
-def _stat_card(icon, bg, label, value, sublabel):
+def _stat_card(icon, bg, label, value, sublabel, key=None):
     """A single flat stat card: icon badge, label, big value, small caption —
     matches the 'Projects in View / Tasks / Completed Tasks / Team Members'
     cards in the screenshot."""
-    with st.container(border=True):
+    with st.container(border=True, key=key):
         _icon_badge(icon, bg)
         st.markdown(f"<div style='color:#6B7280; font-size:0.85rem;'>{label}</div>", unsafe_allow_html=True)
         st.markdown(f"<div style='font-size:1.7rem; font-weight:700; color:#111827;'>{value}</div>",
                     unsafe_allow_html=True)
         st.caption(sublabel)
+
+
+def _hover_stat_card(icon, bg, label, value, sublabel, key):
+    """
+    Same as _stat_card, but rendered inside a container with a unique
+    `key` so the boxed look + hover highlight (see
+    _inject_stat_card_hover_css) can target exactly these summary cards.
+    Streamlit adds a `st-key-<key>` class to the container's wrapper div,
+    which is what the CSS below matches on.
+    """
+    _stat_card(icon, bg, label, value, sublabel, key=key)
+
+
+def _inject_stat_card_hover_css():
+    """
+    Scoped CSS for stat-card / quick-action containers: a clearly visible
+    white box at rest, plus a strong highlight + lift-on-hover. Targets
+    containers via their `st-key-stat-card-*` class (set by passing key=
+    to st.container), which is reliable regardless of DOM nesting —
+    unlike sibling-selector tricks. Applied on every page that renders
+    stat cards (Dashboard, Projects, Clients) and on the Dashboard's
+    Quick Actions tiles.
+    """
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-stat-card-"] {
+            background-color: #FFFFFF !important;
+            border: 1.5px solid #D8DCE5 !important;
+            border-radius: 14px !important;
+            box-shadow: 0 2px 6px rgba(16,24,40,0.08) !important;
+            transition: transform 0.15s ease, box-shadow 0.15s ease,
+                        border-color 0.15s ease, background-color 0.15s ease;
+            cursor: pointer;
+        }
+        div[class*="st-key-stat-card-"]:hover {
+            background-color: #F5F3FF !important;
+            border-color: #818CF8 !important;
+            transform: translateY(-4px);
+            box-shadow: 0 12px 28px rgba(79,70,229,0.22) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _pill_html(text, cls):
@@ -719,6 +763,8 @@ def _go_to(page_label, **flags):
 def _render_manager_dashboard(projects, token):
     user = session_user()
 
+    _inject_stat_card_hover_css()
+
     hour = dt.datetime.now().hour
     salutation = "Good Morning" if hour < 12 else ("Good Afternoon" if hour < 18 else "Good Evening")
     header_col, avatar_col = st.columns([6, 1])
@@ -757,16 +803,20 @@ def _render_manager_dashboard(projects, token):
     # ---- Stat cards (icon badge + label + value + sublabel) --------------
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        _stat_card("📁", "#EEF2FF", "Projects in View", len(scoped_projects), "Active Projects")
+        _hover_stat_card("📁", "#EEF2FF", "Projects in View", len(scoped_projects), "Active Projects",
+                          key="stat-card-dash-0")
     with c2:
-        _stat_card("✅", "#ECFDF5", "Tasks", len(tasks), "Total Tasks")
+        _hover_stat_card("✅", "#ECFDF5", "Tasks", len(tasks), "Total Tasks", key="stat-card-dash-1")
     with c3:
-        _stat_card("🏅", "#EFF6FF", "Completed Tasks", completed_n, "Tasks Completed")
+        _hover_stat_card("🏅", "#EFF6FF", "Completed Tasks", completed_n, "Tasks Completed",
+                          key="stat-card-dash-2")
     with c4:
         if active_project_id:
-            _stat_card("👥", "#F5F3FF", "Team Members", len(team), "Active Members")
+            _hover_stat_card("👥", "#F5F3FF", "Team Members", len(team), "Active Members",
+                              key="stat-card-dash-3")
         else:
-            _stat_card("👥", "#F5F3FF", "Active Projects", active_n, "Active Members")
+            _hover_stat_card("👥", "#F5F3FF", "Active Projects", active_n, "Active Members",
+                              key="stat-card-dash-3")
 
     st.write("")
 
@@ -807,21 +857,23 @@ def _render_manager_dashboard(projects, token):
     with doc_col:
         with st.container(border=True):
             st.subheader("📄 Documents")
-            if not documents:
-                st.caption("No documents for this project context.")
-            else:
-                for doc in documents[:5]:
-                    row = st.columns([3, 1])
-                    with row[0]:
-                        st.write(doc["filename"])
-                    with row[1]:
-                        resp = download_document(token, str(doc["id"]))
-                        if resp.status_code == 200:
-                            st.download_button("Get", data=resp.content, file_name=doc["filename"],
-                                                mime="application/octet-stream",
-                                                key=f"mgr_dash_dl_{doc['id']}", use_container_width=True)
-                        else:
-                            show_api_error(resp)
+            st.caption("Files uploaded for this project context.")
+            with st.container(height=280):
+                if not documents:
+                    st.caption("No documents for this project context.")
+                else:
+                    for doc in documents:
+                        row = st.columns([3, 1])
+                        with row[0]:
+                            st.write(doc["filename"])
+                        with row[1]:
+                            resp = download_document(token, str(doc["id"]))
+                            if resp.status_code == 200:
+                                st.download_button("Get", data=resp.content, file_name=doc["filename"],
+                                                    mime="application/octet-stream",
+                                                    key=f"mgr_dash_dl_{doc['id']}", use_container_width=True)
+                            else:
+                                show_api_error(resp)
 
     with deadline_col:
         with st.container(border=True):
@@ -831,18 +883,19 @@ def _render_manager_dashboard(projects, token):
                      for p in scoped_projects if p.get("deadline")]
             dated = [d for d in dated if d[2] is not None]
             dated.sort(key=lambda d: d[2])
-            if not dated:
-                st.caption("No deadlines in this view.")
-            else:
-                for name, deadline, days in dated[:5]:
-                    pill_text, pill_class = _deadline_pill(days)
-                    row_l, row_r = st.columns([3, 1])
-                    with row_l:
-                        st.markdown(f"📅 **{name}**")
-                        st.caption(f"{deadline} ({days}d)")
-                    with row_r:
-                        st.markdown(_pill_html(pill_text, pill_class), unsafe_allow_html=True)
-                    st.divider()
+            with st.container(height=220):
+                if not dated:
+                    st.caption("No deadlines in this view.")
+                else:
+                    for name, deadline, days in dated:
+                        pill_text, pill_class = _deadline_pill(days)
+                        row_l, row_r = st.columns([3, 1])
+                        with row_l:
+                            st.markdown(f"📅 **{name}**")
+                            st.caption(f"{deadline} ({days}d)")
+                        with row_r:
+                            st.markdown(_pill_html(pill_text, pill_class), unsafe_allow_html=True)
+                        st.divider()
             st.button(
                 "View all deadlines →", key="mgr_dash_view_deadlines",
                 use_container_width=True, on_click=_go_to, args=("📁 Projects",),
@@ -874,23 +927,66 @@ def _render_manager_dashboard(projects, token):
             all_tasks = all_tasks_resp.json() if all_tasks_resp.status_code == 200 else tasks
             recent_tasks = sorted(
                 all_tasks, key=lambda t: str(t.get("created_at") or ""), reverse=True
-            )[:5] or all_tasks[:5]
+            )[:8] or all_tasks[:8]
             if not recent_tasks:
                 st.caption("No tasks yet.")
             else:
                 proj_name_by_id = {str(p["id"]): p["name"] for p in projects}
-                for t in recent_tasks:
-                    with st.container(border=True):
-                        pill_text, pill_class = _task_status_pill(t.get("status"))
-                        title_col, tag_col = st.columns([3, 1.4])
-                        with title_col:
-                            st.markdown(f"🔸 **{t.get('title', '—')}**")
-                        with tag_col:
-                            st.markdown(_pill_html(pill_text, pill_class), unsafe_allow_html=True)
-                        proj_name = proj_name_by_id.get(str(t.get("project_id")), "—")
-                        due = t.get("due_date")
-                        due_txt = f"📅 {str(due)[:10]}" if due else "📅 No due date"
-                        st.caption(f"{proj_name} · {due_txt}")
+
+                pill_color_map = {
+                    "pill-blue": "#1D4ED8", "pill-orange": "#B45309",
+                    "pill-gray": "#374151", "pill-green": "#15803D",
+                }
+
+                def _recent_task_card_html(t):
+                    pill_text, pill_class = _task_status_pill(t.get("status"))
+                    pill_color = pill_color_map.get(pill_class, "#374151")
+                    proj_name = html.escape(str(proj_name_by_id.get(str(t.get("project_id")), "—")))
+                    due = t.get("due_date")
+                    due_txt = f"📅 {str(due)[:10]}" if due else "📅 No due date"
+                    title = html.escape(str(t.get("title") or "—"))
+                    return (
+                        "<div class='mgr-task-card'>"
+                        f"<div style='font-weight:600;color:#111827;font-size:0.9rem;'>🔸 {title}</div>"
+                        "<div style='margin-top:6px;'>"
+                        f"<span class='mgr-task-pill' style='background:{pill_color}1A;color:{pill_color};'>"
+                        f"{pill_text}</span></div>"
+                        f"<div style='color:#6B7280;font-size:0.78rem;margin-top:6px;'>{proj_name} · {due_txt}</div>"
+                        "</div>"
+                    )
+
+                shown_tasks = recent_tasks[:8]
+                cards_html = "".join(_recent_task_card_html(t) for t in shown_tasks)
+                arrow_html = (
+                    "<div class='mgr-task-arrow' title='Scroll for more'>&#8594;</div>"
+                    if len(all_tasks) > len(shown_tasks) else ""
+                )
+
+                st.markdown(
+                    "<style>"
+                    ".mgr-task-scroll {"
+                    "    display:flex; gap:12px; overflow-x:auto; padding:4px 4px 10px 4px;"
+                    "    scroll-behavior:smooth;"
+                    "}"
+                    ".mgr-task-card {"
+                    "    min-width:200px; flex:0 0 auto; background:#FFFFFF;"
+                    "    border:1px solid #E5E7EB; border-radius:10px; padding:12px;"
+                    "}"
+                    ".mgr-task-pill {"
+                    "    display:inline-block; padding:2px 10px; border-radius:999px;"
+                    "    font-size:0.72rem; font-weight:600;"
+                    "}"
+                    ".mgr-task-arrow {"
+                    "    flex:0 0 auto; display:flex; align-items:center; justify-content:center;"
+                    "    width:40px; min-width:40px; border-radius:10px; background:#EEF2FF;"
+                    "    font-size:1.3rem; color:#4F46E5; font-weight:700;"
+                    "}"
+                    ".mgr-task-scroll::-webkit-scrollbar { height:6px; }"
+                    ".mgr-task-scroll::-webkit-scrollbar-thumb { background:#D8DCE5; border-radius:6px; }"
+                    "</style>"
+                    f"<div class='mgr-task-scroll'>{cards_html}{arrow_html}</div>",
+                    unsafe_allow_html=True,
+                )
             st.button(
                 "View all tasks →", key="mgr_dash_view_tasks",
                 use_container_width=True, on_click=_go_to, args=("✅ Tasks",),
@@ -902,20 +998,21 @@ def _render_manager_dashboard(projects, token):
             st.caption("What your team is working on.")
             users, users_ok = _fetch_users_safely(token)
             staff = [u for u in users if (u.get("role") or "").lower() in ("manager", "employee")]
-            if not staff:
-                st.caption("No team members found.")
-            else:
-                for member in staff[:5]:
-                    row_l, row_r = st.columns([3, 1.2])
-                    with row_l:
-                        st.markdown(
-                            f"<span class='status-dot' style='background:#22C55E;'></span>"
-                            f"<b>{member.get('name', '—')}</b>",
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(member.get("email", "—"))
-                    with row_r:
-                        st.markdown(_pill_html("Active", "pill-green"), unsafe_allow_html=True)
+            with st.container(height=220):
+                if not staff:
+                    st.caption("No team members found.")
+                else:
+                    for member in staff:
+                        row_l, row_r = st.columns([3, 1.2])
+                        with row_l:
+                            st.markdown(
+                                f"<span class='status-dot' style='background:#22C55E;'></span>"
+                                f"<b>{member.get('name', '—')}</b>",
+                                unsafe_allow_html=True,
+                            )
+                            st.caption(member.get("email", "—"))
+                        with row_r:
+                            st.markdown(_pill_html("Active", "pill-green"), unsafe_allow_html=True)
             st.button(
                 "View team →", key="mgr_dash_view_team",
                 use_container_width=True, on_click=_go_to, args=("📁 Projects",),
@@ -928,7 +1025,7 @@ def _render_manager_dashboard(projects, token):
         qa1, qa2, qa3, qa4, qa5 = st.columns(5)
 
         with qa1:
-            with st.container(border=True):
+            with st.container(border=True, key="stat-card-qa-0"):
                 _icon_badge("➕", "#EEF2FF")
                 st.markdown("<div class='qa-title'>New Project</div>", unsafe_allow_html=True)
                 st.caption("Create a new project")
@@ -939,7 +1036,7 @@ def _render_manager_dashboard(projects, token):
                 )
 
         with qa2:
-            with st.container(border=True):
+            with st.container(border=True, key="stat-card-qa-1"):
                 _icon_badge("👥", "#ECFDF5")
                 st.markdown("<div class='qa-title'>Invite Team</div>", unsafe_allow_html=True)
                 st.caption("Add team members")
@@ -950,7 +1047,7 @@ def _render_manager_dashboard(projects, token):
                 )
 
         with qa3:
-            with st.container(border=True):
+            with st.container(border=True, key="stat-card-qa-2"):
                 _icon_badge("📤", "#FFF7ED")
                 st.markdown("<div class='qa-title'>Upload Document</div>", unsafe_allow_html=True)
                 st.caption("Share files & docs")
@@ -960,7 +1057,7 @@ def _render_manager_dashboard(projects, token):
                 )
 
         with qa4:
-            with st.container(border=True):
+            with st.container(border=True, key="stat-card-qa-3"):
                 _icon_badge("🎙️", "#F5F3FF")
                 st.markdown("<div class='qa-title'>Schedule Meeting</div>", unsafe_allow_html=True)
                 st.caption("Plan team meetings")
@@ -970,7 +1067,7 @@ def _render_manager_dashboard(projects, token):
                 )
 
         with qa5:
-            with st.container(border=True):
+            with st.container(border=True, key="stat-card-qa-4"):
                 _icon_badge("✨", "#FEF9C3")
                 st.markdown("<div class='qa-title'>Ask AI</div>", unsafe_allow_html=True)
                 st.caption("Get AI insights")
@@ -2382,16 +2479,19 @@ def _render_manager_projects(projects, token):
     st.caption("View, create, edit projects, and assign project teams.")
     st.write("")
 
+    _inject_stat_card_hover_css()
+
     active_n = sum(1 for p in projects if (p.get("status") or "").lower() == "active")
     completed_n = sum(1 for p in projects if (p.get("status") or "").lower() == "completed")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        _stat_card("📁", "#DBEAFE", "Total Projects", len(projects), "All projects")
+        _hover_stat_card("📁", "#DBEAFE", "Total Projects", len(projects), "All projects",
+                          key="stat-card-proj-0")
     with c2:
-        _stat_card("🟢", "#DCFCE7", "Active", active_n, "In progress")
+        _hover_stat_card("🟢", "#DCFCE7", "Active", active_n, "In progress", key="stat-card-proj-1")
     with c3:
-        _stat_card("✅", "#EDE9FE", "Completed", completed_n, "Finished")
+        _hover_stat_card("✅", "#EDE9FE", "Completed", completed_n, "Finished", key="stat-card-proj-2")
 
     st.write("")
 
@@ -2624,6 +2724,8 @@ def _render_manager_clients(token, projects):
     st.caption("View, add, edit, and delete your organization's client accounts.")
     st.write("")
 
+    _inject_stat_card_hover_css()
+
     clients_resp = get_clients(token)
     if clients_resp.status_code != 200:
         show_api_error(clients_resp)
@@ -2636,13 +2738,14 @@ def _render_manager_clients(token, projects):
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        _stat_card("🏢", "#EDE9FE", "Total Clients", len(clients), "All clients")
+        _hover_stat_card("🏢", "#EDE9FE", "Total Clients", len(clients), "All clients",
+                          key="stat-card-client-0")
     with c2:
-        _stat_card("🟢", "#DCFCE7", "Active", active_n, "Active clients")
+        _hover_stat_card("🟢", "#DCFCE7", "Active", active_n, "Active clients", key="stat-card-client-1")
     with c3:
-        _stat_card("🟡", "#FEF9C3", "Pending", pending_n, "Pending clients")
+        _hover_stat_card("🟡", "#FEF9C3", "Pending", pending_n, "Pending clients", key="stat-card-client-2")
     with c4:
-        _stat_card("⚪", "#F3F4F6", "Inactive", inactive_n, "Inactive clients")
+        _hover_stat_card("⚪", "#F3F4F6", "Inactive", inactive_n, "Inactive clients", key="stat-card-client-3")
 
     st.write("")
 
@@ -3455,7 +3558,6 @@ def render_manager_app():
             label_visibility="collapsed",
             key=NAV_RADIO_KEY,
         )
-        render_sidebar_logout()
 
     # Clear task-dialog flags on navigation so a dialog closed with X/Esc
     # cannot reopen automatically after returning to the Tasks page.
